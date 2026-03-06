@@ -441,8 +441,8 @@
 					<div v-if="hasTexture && hasLayers" class="lmp-controls">\
 						<div class="lmp-control-row">\
 							<label>Opacity</label>\
-							<input type="range" min="0" max="1" step="0.01" :value="currentOpacity" @input="setOpacity($event)" />\
-							<span>{{ Math.round(currentOpacity * 100) }}%</span>\
+							<input type="range" min="0" max="100" step="1" :value="currentOpacity" @input="setOpacity($event)" />\
+							<span>{{ Math.round(currentOpacity) }}%</span>\
 						</div>\
 						<div class="lmp-control-row">\
 							<label>Blend</label>\
@@ -613,7 +613,7 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					layer.opacity = parseFloat(event.target.value);
+					layer.opacity = parseInt(event.target.value, 10);
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
