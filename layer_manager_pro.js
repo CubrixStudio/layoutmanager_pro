@@ -16,6 +16,128 @@
 	const lockedLayers = new Set();
 	const layerGroups = {}; // { groupName: [layerUUIDs] }
 
+	// Non-destructive filter system
+	// layerFilterStacks[layerUUID] = { original: ImageData|null, filters: [{ id, name, enabled, intensity }] }
+	const layerFilterStacks = {};
+	let filterIdCounter = 0;
+
+	function getFilterStack(layerUUID) {
+		if (!layerFilterStacks[layerUUID]) {
+			layerFilterStacks[layerUUID] = { original: null, filters: [] };
+		}
+		return layerFilterStacks[layerUUID];
+	}
+
+	function snapshotOriginal(layer) {
+		const stack = getFilterStack(layer.uuid);
+		if (!stack.original) {
+			stack.original = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
+		}
+	}
+
+	function recomputeFilters(layer) {
+		const tex = getSelectedTexture();
+		const stack = getFilterStack(layer.uuid);
+		if (!stack.original || stack.filters.length === 0) return;
+
+		// Restore original pixels
+		var w = layer.canvas.width;
+		var h = layer.canvas.height;
+		var origData = stack.original;
+
+		// Start from a copy of original
+		var working = new ImageData(new Uint8ClampedArray(origData.data), w, h);
+
+		// Apply each enabled filter in order with its intensity
+		stack.filters.forEach(function (f) {
+			if (!f.enabled) return;
+			var intensity = f.intensity / 100;
+			if (intensity <= 0) return;
+
+			// Get a copy before this filter to blend with
+			var before = new Uint8ClampedArray(working.data);
+
+			applyFilterToImageData(f.name, working, w, h);
+
+			// Blend between before and after based on intensity
+			if (intensity < 1) {
+				var d = working.data;
+				for (var i = 0; i < d.length; i += 4) {
+					d[i] = before[i] + (d[i] - before[i]) * intensity;
+					d[i + 1] = before[i + 1] + (d[i + 1] - before[i + 1]) * intensity;
+					d[i + 2] = before[i + 2] + (d[i + 2] - before[i + 2]) * intensity;
+					d[i + 3] = before[i + 3] + (d[i + 3] - before[i + 3]) * intensity;
+				}
+			}
+		});
+
+		layer.ctx.putImageData(working, 0, 0);
+		if (tex) tex.updateLayerChanges(true);
+	}
+
+	function addFilterToStack(layer, filterName) {
+		snapshotOriginal(layer);
+		var stack = getFilterStack(layer.uuid);
+		stack.filters.push({
+			id: ++filterIdCounter,
+			name: filterName,
+			enabled: true,
+			intensity: 100,
+		});
+		recomputeFilters(layer);
+		updatePanel();
+	}
+
+	function removeFilterFromStack(layerUUID, filterId) {
+		var stack = getFilterStack(layerUUID);
+		var idx = stack.filters.findIndex(function (f) { return f.id === filterId; });
+		if (idx !== -1) stack.filters.splice(idx, 1);
+		// If no filters left, restore original and clear snapshot
+		var tex = getSelectedTexture();
+		if (stack.filters.length === 0 && stack.original) {
+			var layer = tex ? tex.layers.find(function (l) { return l.uuid === layerUUID; }) : null;
+			if (layer) {
+				layer.ctx.putImageData(stack.original, 0, 0);
+				if (tex) tex.updateLayerChanges(true);
+			}
+			stack.original = null;
+		} else {
+			var layer = tex ? tex.layers.find(function (l) { return l.uuid === layerUUID; }) : null;
+			if (layer) recomputeFilters(layer);
+		}
+		updatePanel();
+	}
+
+	function toggleFilterEnabled(layerUUID, filterId) {
+		var stack = getFilterStack(layerUUID);
+		var f = stack.filters.find(function (x) { return x.id === filterId; });
+		if (f) f.enabled = !f.enabled;
+		var tex = getSelectedTexture();
+		var layer = tex ? tex.layers.find(function (l) { return l.uuid === layerUUID; }) : null;
+		if (layer) recomputeFilters(layer);
+		updatePanel();
+	}
+
+	function setFilterIntensity(layerUUID, filterId, intensity) {
+		var stack = getFilterStack(layerUUID);
+		var f = stack.filters.find(function (x) { return x.id === filterId; });
+		if (f) f.intensity = intensity;
+		var tex = getSelectedTexture();
+		var layer = tex ? tex.layers.find(function (l) { return l.uuid === layerUUID; }) : null;
+		if (layer) recomputeFilters(layer);
+	}
+
+	const FILTER_LABELS = {
+		grayscale: 'Grayscale',
+		invert: 'Invert',
+		brightness_up: 'Brightness +',
+		brightness_down: 'Brightness -',
+		contrast: 'Contrast',
+		sepia: 'Sepia',
+		blur: 'Blur',
+		sharpen: 'Sharpen',
+	};
+
 	// ---- Helpers ----
 
 	function getSelectedTexture() {
@@ -276,23 +398,8 @@
 
 	// ---- Filter Operations ----
 
-	function applyFilter(filterName) {
-		const tex = getSelectedTexture();
-		const layer = getSelectedLayer();
-		if (!tex || !layer) {
-			Blockbench.showQuickMessage('No layer selected', 1500);
-			return;
-		}
-		if (isLayerLocked(layer)) {
-			Blockbench.showQuickMessage('Layer is locked', 1500);
-			return;
-		}
-
-		Undo.initEdit({ textures: [tex] });
-
-		const canvas = layer.canvas;
-		const ctx = layer.ctx;
-		const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+	// Pure filter: applies filter to an ImageData in-place (no layer/texture side effects)
+	function applyFilterToImageData(filterName, imageData, width, height) {
 		const data = imageData.data;
 
 		switch (filterName) {
@@ -329,7 +436,7 @@
 				}
 				break;
 
-			case 'contrast':
+			case 'contrast': {
 				const factor = (259 * (80 + 255)) / (255 * (259 - 80));
 				for (let i = 0; i < data.length; i += 4) {
 					data[i] = Math.min(255, Math.max(0, factor * (data[i] - 128) + 128));
@@ -337,6 +444,7 @@
 					data[i + 2] = Math.min(255, Math.max(0, factor * (data[i + 2] - 128) + 128));
 				}
 				break;
+			}
 
 			case 'sepia':
 				for (let i = 0; i < data.length; i += 4) {
@@ -348,22 +456,28 @@
 				break;
 
 			case 'blur':
-				applyBoxBlur(imageData, canvas.width, canvas.height, 1);
+				applyBoxBlur(imageData, width, height, 1);
 				break;
 
 			case 'sharpen':
-				applySharpen(imageData, canvas.width, canvas.height);
+				applySharpen(imageData, width, height);
 				break;
-
-			default:
-				Undo.cancelEdit();
-				return;
 		}
+	}
 
-		ctx.putImageData(imageData, 0, 0);
-		Undo.finishEdit('Apply filter: ' + filterName);
-		tex.updateLayerChanges(true);
-		updatePanel();
+	// Entry point: adds a filter non-destructively to the selected layer
+	function applyFilter(filterName) {
+		const tex = getSelectedTexture();
+		const layer = getSelectedLayer();
+		if (!tex || !layer) {
+			Blockbench.showQuickMessage('No layer selected', 1500);
+			return;
+		}
+		if (isLayerLocked(layer)) {
+			Blockbench.showQuickMessage('Layer is locked', 1500);
+			return;
+		}
+		addFilterToStack(layer, filterName);
 	}
 
 	function applyBoxBlur(imageData, width, height, radius) {
@@ -539,7 +653,29 @@
 						</template>\
 					</div>\
 					\
-					<div v-else class="lmp-empty">\
+					<div v-if="hasTexture && hasLayers && selectedFilters.length > 0" class="lmp-filter-history">\
+						<div class="lmp-filter-history-header" @click="filtersExpanded = !filtersExpanded">\
+							<i class="material-icons lmp-chevron">{{ filtersExpanded ? "expand_more" : "chevron_right" }}</i>\
+							<i class="material-icons" style="font-size:15px; opacity:0.7; color:#ab47bc;">auto_fix_high</i>\
+							<span>Filters</span>\
+							<span class="lmp-group-count">{{ selectedFilters.length }}</span>\
+						</div>\
+						<div v-if="filtersExpanded" class="lmp-filter-list">\
+							<div v-for="f in selectedFilters" :key="f.id" class="lmp-filter-item" :class="{ disabled: !f.enabled }">\
+								<button class="lmp-btn" @click="toggleFilterEnable(f.id)" :title="f.enabled ? \'Disable\' : \'Enable\'">\
+									<i class="material-icons">{{ f.enabled ? "visibility" : "visibility_off" }}</i>\
+								</button>\
+								<span class="lmp-filter-name">{{ filterLabel(f.name) }}</span>\
+								<input type="range" class="lmp-filter-intensity" min="0" max="100" step="1" :value="f.intensity" @input="onFilterIntensity(f.id, $event)" title="Intensity" />\
+								<span class="lmp-filter-pct">{{ f.intensity }}%</span>\
+								<button class="lmp-btn lmp-btn-danger" @click="removeFilter(f.id)" title="Remove filter">\
+									<i class="material-icons">close</i>\
+								</button>\
+							</div>\
+						</div>\
+					</div>\
+					\
+					<div v-else-if="!hasTexture || !hasLayers" class="lmp-empty">\
 						<p v-if="!hasTexture">No texture selected.</p>\
 						<p v-else>No layers. Click + to add a layer.</p>\
 					</div>\
@@ -549,6 +685,7 @@
 				return {
 					tick: 0,
 					collapsed: {},
+					filtersExpanded: true,
 				};
 			},
 			computed: {
@@ -574,6 +711,13 @@
 					this.tick;
 					var layer = getSelectedLayer();
 					return layer ? layer.blend_mode : 'default';
+				},
+				selectedFilters: function () {
+					this.tick;
+					var layer = getSelectedLayer();
+					if (!layer) return [];
+					var stack = getFilterStack(layer.uuid);
+					return stack.filters;
 				},
 				layerTree: function () {
 					this.tick;
@@ -740,6 +884,27 @@
 					removeLayerFromGroup(groupName, uuid);
 					this.tick++;
 				},
+				filterLabel: function (name) {
+					return FILTER_LABELS[name] || name;
+				},
+				toggleFilterEnable: function (filterId) {
+					var layer = getSelectedLayer();
+					if (!layer) return;
+					toggleFilterEnabled(layer.uuid, filterId);
+					this.tick++;
+				},
+				onFilterIntensity: function (filterId, event) {
+					var layer = getSelectedLayer();
+					if (!layer) return;
+					setFilterIntensity(layer.uuid, filterId, parseInt(event.target.value, 10));
+					this.tick++;
+				},
+				removeFilter: function (filterId) {
+					var layer = getSelectedLayer();
+					if (!layer) return;
+					removeFilterFromStack(layer.uuid, filterId);
+					this.tick++;
+				},
 			},
 		};
 	}
@@ -826,6 +991,20 @@
 				/* Collapsed state */\
 				.lmp-group.collapsed { opacity: 0.85; }\
 				.lmp-group.collapsed .lmp-group-header { border-radius: 0; }\
+				\
+				/* Filter history */\
+				.lmp-filter-history { margin-top: 8px; border: 1px solid var(--color-border); border-radius: 5px; overflow: hidden; background: var(--color-back); }\
+				.lmp-filter-history-header { display: flex; align-items: center; gap: 4px; padding: 5px 6px; background: var(--color-button); cursor: pointer; user-select: none; transition: background 0.12s; }\
+				.lmp-filter-history-header:hover { background: color-mix(in srgb, var(--color-accent) 25%, var(--color-button)); }\
+				.lmp-filter-history-header span { font-size: 12px; font-weight: 600; }\
+				.lmp-filter-history-header span:first-of-type { flex: 1; }\
+				.lmp-filter-list { padding: 3px; }\
+				.lmp-filter-item { display: flex; align-items: center; gap: 3px; padding: 3px 5px; border-radius: 4px; margin-bottom: 1px; transition: all 0.12s; border-left: 3px solid #ab47bc; background: color-mix(in srgb, var(--color-button) 50%, var(--color-back)); }\
+				.lmp-filter-item:hover { background: var(--color-button); }\
+				.lmp-filter-item.disabled { opacity: 0.4; border-left-color: var(--color-border); }\
+				.lmp-filter-name { flex: 0 0 auto; font-size: 11px; min-width: 70px; white-space: nowrap; }\
+				.lmp-filter-intensity { flex: 1; height: 12px; min-width: 40px; cursor: pointer; }\
+				.lmp-filter-pct { font-size: 10px; min-width: 28px; text-align: right; opacity: 0.6; }\
 				\
 				/* Empty state */\
 				.lmp-empty { padding: 20px 12px; text-align: center; opacity: 0.5; font-size: 12px; }\
@@ -966,6 +1145,9 @@
 			lockedLayers.clear();
 			for (var key in layerGroups) {
 				delete layerGroups[key];
+			}
+			for (var key in layerFilterStacks) {
+				delete layerFilterStacks[key];
 			}
 		},
 	});
