@@ -14,10 +14,48 @@
 	let codecCompileCb = null;
 	let codecParseCb = null;
 
-	// Track locked layers and layer groups (folders)
-	const lockedLayers = new Set();
-	const layerGroups = {}; // { groupName: [layerUUIDs] }
-	const layerGroupOrder = []; // ordered group names
+	// Per-texture data: groups, group order, and locks (independent per texture)
+	const perTextureData = {}; // { textureUUID: { groups: {}, groupOrder: [], locks: Set } }
+
+	function getTexData(texUUID) {
+		if (!texUUID) {
+			var tex = getSelectedTexture();
+			if (!tex) return { groups: {}, groupOrder: [], locks: new Set() };
+			texUUID = tex.uuid;
+		}
+		if (!perTextureData[texUUID]) {
+			perTextureData[texUUID] = { groups: {}, groupOrder: [], locks: new Set() };
+		}
+		return perTextureData[texUUID];
+	}
+
+	// Shorthand accessors for current texture's data
+	function _groups() { return getTexData().groups; }
+	function _groupOrder() { return getTexData().groupOrder; }
+	function _locks() { return getTexData().locks; }
+
+	// ---- Drag & Drop state ----
+	var dragInfo = {
+		type: null,        // 'layer' | 'group' | 'filter'
+		layerUUID: null,
+		sourceGroup: null,
+		groupName: null,
+		filterId: null,
+	};
+
+	function getDragPos(event, element) {
+		var rect = element.getBoundingClientRect();
+		var ratio = (event.clientY - rect.top) / rect.height;
+		return ratio < 0.5 ? 'before' : 'after';
+	}
+
+	function getDragPos3(event, element) {
+		var rect = element.getBoundingClientRect();
+		var ratio = (event.clientY - rect.top) / rect.height;
+		if (ratio < 0.25) return 'before';
+		if (ratio > 0.75) return 'after';
+		return 'inside';
+	}
 
 	// ---- Reordering helpers ----
 
@@ -41,7 +79,7 @@
 
 	function moveLayerInGroup(groupName, layerUUID, direction) {
 		// direction: -1 = up, +1 = down in the displayed list
-		var uuids = layerGroups[groupName];
+		var uuids = _groups()[groupName];
 		if (!uuids) return;
 		var idx = uuids.indexOf(layerUUID);
 		if (idx === -1) return;
@@ -54,13 +92,13 @@
 	}
 
 	function moveGroup(groupName, direction) {
-		var idx = layerGroupOrder.indexOf(groupName);
+		var idx = _groupOrder().indexOf(groupName);
 		if (idx === -1) return;
 		var newIdx = idx + direction;
-		if (newIdx < 0 || newIdx >= layerGroupOrder.length) return;
-		var tmp = layerGroupOrder[idx];
-		layerGroupOrder[idx] = layerGroupOrder[newIdx];
-		layerGroupOrder[newIdx] = tmp;
+		if (newIdx < 0 || newIdx >= _groupOrder().length) return;
+		var tmp = _groupOrder()[idx];
+		_groupOrder()[idx] = _groupOrder()[newIdx];
+		_groupOrder()[newIdx] = tmp;
 		updatePanel();
 	}
 
@@ -214,7 +252,7 @@
 	}
 
 	function isLayerLocked(layer) {
-		return layer && lockedLayers.has(layer.uuid);
+		return layer && _locks().has(layer.uuid);
 	}
 
 	function ensureLayersEnabled(texture) {
@@ -230,48 +268,48 @@
 	function createLayerGroup(name) {
 		if (!name) {
 			Blockbench.textPrompt('New Layer Group', 'Group 1', function (value) {
-				if (value && !layerGroups[value]) {
-					layerGroups[value] = [];
-					layerGroupOrder.push(value);
+				if (value && !_groups()[value]) {
+					_groups()[value] = [];
+					_groupOrder().push(value);
 					Blockbench.showQuickMessage('Created group: ' + value, 1500);
 					updatePanel();
 				}
 			});
-		} else if (!layerGroups[name]) {
-			layerGroups[name] = [];
-			layerGroupOrder.push(name);
+		} else if (!_groups()[name]) {
+			_groups()[name] = [];
+			_groupOrder().push(name);
 			updatePanel();
 		}
 	}
 
 	function addLayerToGroup(groupName, layerUUID) {
-		if (!layerGroups[groupName]) return;
-		if (layerGroups[groupName].indexOf(layerUUID) === -1) {
-			layerGroups[groupName].push(layerUUID);
+		if (!_groups()[groupName]) return;
+		if (_groups()[groupName].indexOf(layerUUID) === -1) {
+			_groups()[groupName].push(layerUUID);
 		}
 		updatePanel();
 	}
 
 	function removeLayerFromGroup(groupName, layerUUID) {
-		if (!layerGroups[groupName]) return;
-		const idx = layerGroups[groupName].indexOf(layerUUID);
+		if (!_groups()[groupName]) return;
+		const idx = _groups()[groupName].indexOf(layerUUID);
 		if (idx !== -1) {
-			layerGroups[groupName].splice(idx, 1);
+			_groups()[groupName].splice(idx, 1);
 		}
 		updatePanel();
 	}
 
 	function deleteLayerGroup(groupName) {
-		delete layerGroups[groupName];
-		var idx = layerGroupOrder.indexOf(groupName);
-		if (idx !== -1) layerGroupOrder.splice(idx, 1);
+		delete _groups()[groupName];
+		var idx = _groupOrder().indexOf(groupName);
+		if (idx !== -1) _groupOrder().splice(idx, 1);
 		updatePanel();
 	}
 
 	function toggleGroupVisibility(groupName) {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return;
-		const uuids = layerGroups[groupName] || [];
+		const uuids = _groups()[groupName] || [];
 		const layers = tex.layers.filter(function (l) {
 			return uuids.indexOf(l.uuid) !== -1;
 		});
@@ -289,11 +327,11 @@
 
 	function toggleLayerLock(layer) {
 		if (!layer) return;
-		if (lockedLayers.has(layer.uuid)) {
-			lockedLayers.delete(layer.uuid);
+		if (_locks().has(layer.uuid)) {
+			_locks().delete(layer.uuid);
 			Blockbench.showQuickMessage('Layer unlocked: ' + layer.name, 1000);
 		} else {
-			lockedLayers.add(layer.uuid);
+			_locks().add(layer.uuid);
 			Blockbench.showQuickMessage('Layer locked: ' + layer.name, 1000);
 		}
 		updatePanel();
@@ -601,10 +639,21 @@
 	// ---- Persistence (save/load into .bbmodel) ----
 
 	function serializeLmpData() {
+		var perTex = {};
+		for (var texUUID in perTextureData) {
+			var td = perTextureData[texUUID];
+			var hasGroups = Object.keys(td.groups).length > 0;
+			var hasLocks = td.locks.size > 0;
+			if (hasGroups || hasLocks) {
+				perTex[texUUID] = {
+					groups: JSON.parse(JSON.stringify(td.groups)),
+					groupOrder: td.groupOrder.slice(),
+					locks: Array.from(td.locks),
+				};
+			}
+		}
 		return {
-			groups: JSON.parse(JSON.stringify(layerGroups)),
-			groupOrder: layerGroupOrder.slice(),
-			locks: Array.from(lockedLayers),
+			perTexture: perTex,
 			filters: (function () {
 				var out = {};
 				for (var uuid in layerFilterStacks) {
@@ -621,33 +670,47 @@
 	}
 
 	function clearLmpData() {
-		for (var key in layerGroups) delete layerGroups[key];
-		layerGroupOrder.length = 0;
-		lockedLayers.clear();
+		for (var key in perTextureData) delete perTextureData[key];
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
 		filterIdCounter = 0;
+	}
+
+	function _loadTexDataFromSrc(td, src) {
+		if (src.groups) {
+			for (var name in src.groups) {
+				td.groups[name] = src.groups[name].slice();
+			}
+		}
+		if (src.groupOrder && Array.isArray(src.groupOrder)) {
+			src.groupOrder.forEach(function (n) {
+				if (td.groups[n] !== undefined) td.groupOrder.push(n);
+			});
+		}
+		for (var name in td.groups) {
+			if (td.groupOrder.indexOf(name) === -1) td.groupOrder.push(name);
+		}
+		if (src.locks && Array.isArray(src.locks)) {
+			src.locks.forEach(function (uuid) { td.locks.add(uuid); });
+		}
 	}
 
 	function deserializeLmpData(data) {
 		clearLmpData();
 		if (!data) return;
-		if (data.groups) {
-			for (var name in data.groups) {
-				layerGroups[name] = data.groups[name].slice();
+
+		if (data.perTexture) {
+			// New per-texture format
+			for (var texUUID in data.perTexture) {
+				_loadTexDataFromSrc(getTexData(texUUID), data.perTexture[texUUID]);
+			}
+		} else if (data.groups) {
+			// Legacy flat format - assign to current/first texture
+			var tex = getSelectedTexture();
+			if (tex) {
+				_loadTexDataFromSrc(getTexData(tex.uuid), data);
 			}
 		}
-		if (data.groupOrder && Array.isArray(data.groupOrder)) {
-			data.groupOrder.forEach(function (n) {
-				if (layerGroups[n] !== undefined) layerGroupOrder.push(n);
-			});
-		}
-		// Ensure all groups are in the order array
-		for (var name in layerGroups) {
-			if (layerGroupOrder.indexOf(name) === -1) layerGroupOrder.push(name);
-		}
-		if (data.locks && Array.isArray(data.locks)) {
-			data.locks.forEach(function (uuid) { lockedLayers.add(uuid); });
-		}
+
 		if (data.filters) {
 			for (var uuid in data.filters) {
 				var stack = getFilterStack(uuid);
@@ -659,8 +722,6 @@
 						intensity: f.intensity != null ? f.intensity : 100,
 					});
 				});
-				// We need to snapshot original and recompute, but the layer
-				// may not be loaded yet; defer to first panel update
 			}
 		}
 		updatePanel();
@@ -688,8 +749,8 @@
 	}
 
 	function getLayerGroupName(uuid) {
-		for (var name in layerGroups) {
-			if (layerGroups[name].indexOf(uuid) !== -1) return name;
+		for (var name in _groups()) {
+			if (_groups()[name].indexOf(uuid) !== -1) return name;
 		}
 		return null;
 	}
@@ -745,15 +806,20 @@
 						<template v-for="item in layerTree">\
 							\
 							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name) }">\
-								<div class="lmp-group-header" @click="toggleCollapse(item.name)">\
+								<div class="lmp-group-header"\
+									draggable="true"\
+									@click="toggleCollapse(item.name)"\
+									@dragstart.stop="startDragGroup($event, item.name)"\
+									@dragover.prevent.stop="dragOverGroup($event, item.name)"\
+									@dragleave="onDragLeave($event)"\
+									@drop.prevent.stop="dropOnGroup($event, item.name)"\
+									@dragend="dragEnd"\
+									:class="{ \'lmp-drop-above\': dropId === \'group:\' + item.name && dropPos === \'before\', \'lmp-drop-below\': dropId === \'group:\' + item.name && dropPos === \'after\', \'lmp-drop-inside\': dropId === \'group:\' + item.name && dropPos === \'inside\' }">\
+									<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
 									<i class="material-icons lmp-chevron">{{ isCollapsed(item.name) ? "chevron_right" : "expand_more" }}</i>\
 									<i class="material-icons lmp-folder-icon">{{ isCollapsed(item.name) ? "folder" : "folder_open" }}</i>\
 									<span class="lmp-group-name" @dblclick.stop="renameGroup(item.name)">{{ item.name }}</span>\
 									<span class="lmp-group-count">{{ item.layers.length }}</span>\
-									<div class="lmp-move-btns" @click.stop>\
-										<button class="lmp-move-btn" :disabled="!item.canUp" @click="moveGroupUp(item.name)" title="Move group up"><i class="material-icons">arrow_drop_up</i></button>\
-										<button class="lmp-move-btn" :disabled="!item.canDown" @click="moveGroupDown(item.name)" title="Move group down"><i class="material-icons">arrow_drop_down</i></button>\
-									</div>\
 									<button @click.stop="toggleGroupVis(item.name)" :title="item.allVisible ? \'Hide group\' : \'Show group\'" class="lmp-grp-btn">\
 										<i class="material-icons">{{ item.allVisible ? "visibility" : "visibility_off" }}</i>\
 									</button>\
@@ -761,19 +827,24 @@
 										<i class="material-icons">close</i>\
 									</button>\
 								</div>\
-								<div v-if="!isCollapsed(item.name)" class="lmp-group-body">\
+								<div v-if="!isCollapsed(item.name)" class="lmp-group-body"\
+									@dragover.prevent.stop="dragOverGroupBody($event, item.name)"\
+									@drop.prevent.stop="dropOnGroupBody($event, item.name)">\
 									<div v-for="(layer, li) in item.layers" :key="layer.uuid"\
 										class="lmp-layer-item lmp-grouped"\
-										:class="{ selected: isSelected(layer), locked: isLocked(layer) }"\
+										:class="{ selected: isSelected(layer), locked: isLocked(layer), \'lmp-drop-above\': dropId === layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === layer.uuid && dropPos === \'after\' }"\
+										draggable="true"\
+										@dragstart.stop="startDragLayer($event, layer.uuid, item.name)"\
+										@dragover.prevent.stop="dragOverGroupedLayer($event, layer.uuid)"\
+										@dragleave="onDragLeave($event)"\
+										@drop.prevent.stop="dropOnGroupedLayer($event, item.name, layer.uuid)"\
+										@dragend="dragEnd"\
 										@click="selectLayer(layer)">\
+										<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
 										<button class="lmp-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
 											<i class="material-icons">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
 										</button>\
 										<span class="lmp-layer-name" @dblclick.stop="renameLayer(layer)">{{ layer.name }}</span>\
-										<div class="lmp-move-btns" @click.stop>\
-											<button class="lmp-move-btn" :disabled="li === 0" @click="moveLayerInGrp(item.name, layer.uuid, -1)" title="Move up"><i class="material-icons">arrow_drop_up</i></button>\
-											<button class="lmp-move-btn" :disabled="li === item.layers.length - 1" @click="moveLayerInGrp(item.name, layer.uuid, 1)" title="Move down"><i class="material-icons">arrow_drop_down</i></button>\
-										</div>\
 										<button class="lmp-btn" @click.stop="toggleLock(layer)" :title="isLocked(layer) ? \'Unlock\' : \'Lock\'">\
 											<i class="material-icons">{{ isLocked(layer) ? "lock" : "lock_open" }}</i>\
 										</button>\
@@ -784,28 +855,28 @@
 											<i class="material-icons">delete</i>\
 										</button>\
 									</div>\
+									<div v-if="item.layers.length === 0" class="lmp-group-empty">Drop layers here</div>\
 								</div>\
 							</div>\
 							\
 							<div v-else :key="\'l-\' + item.layer.uuid"\
 								class="lmp-layer-item"\
-								:class="{ selected: isSelected(item.layer), locked: isLocked(item.layer) }"\
+								:class="{ selected: isSelected(item.layer), locked: isLocked(item.layer), \'lmp-drop-above\': dropId === item.layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === item.layer.uuid && dropPos === \'after\' }"\
+								draggable="true"\
+								@dragstart="startDragLayer($event, item.layer.uuid, null)"\
+								@dragover.prevent="dragOverLayer($event, item.layer.uuid)"\
+								@dragleave="onDragLeave($event)"\
+								@drop.prevent="dropOnLayer($event, item.layer.uuid)"\
+								@dragend="dragEnd"\
 								@click="selectLayer(item.layer)">\
+								<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
 								<button class="lmp-btn" @click.stop="toggleVis(item.layer)" :title="item.layer.visible ? \'Hide\' : \'Show\'">\
 									<i class="material-icons">{{ item.layer.visible ? "visibility" : "visibility_off" }}</i>\
 								</button>\
 								<span class="lmp-layer-name" @dblclick.stop="renameLayer(item.layer)">{{ item.layer.name }}</span>\
-								<div class="lmp-move-btns" @click.stop>\
-									<button class="lmp-move-btn" @click="moveLayerUp(item.layer)" title="Move up"><i class="material-icons">arrow_drop_up</i></button>\
-									<button class="lmp-move-btn" @click="moveLayerDown(item.layer)" title="Move down"><i class="material-icons">arrow_drop_down</i></button>\
-								</div>\
 								<button class="lmp-btn" @click.stop="toggleLock(item.layer)" :title="isLocked(item.layer) ? \'Unlock\' : \'Lock\'">\
 									<i class="material-icons">{{ isLocked(item.layer) ? "lock" : "lock_open" }}</i>\
 								</button>\
-								<select v-if="groupNames.length" class="lmp-group-select" @change="addToGroup($event, item.layer.uuid)" @click.stop title="Move to group">\
-									<option value="">Group...</option>\
-									<option v-for="gn in groupNames" :key="gn" :value="gn">{{ gn }}</option>\
-								</select>\
 								<button class="lmp-btn lmp-btn-danger" @click.stop="deleteLayer(item.layer)" title="Delete">\
 									<i class="material-icons">delete</i>\
 								</button>\
@@ -821,17 +892,22 @@
 							<span class="lmp-group-count">{{ selectedFilters.length }}</span>\
 						</div>\
 						<div v-if="filtersExpanded" class="lmp-filter-list">\
-							<div v-for="(f, fi) in selectedFilters" :key="f.id" class="lmp-filter-item" :class="{ disabled: !f.enabled }">\
+							<div v-for="(f, fi) in selectedFilters" :key="f.id"\
+								class="lmp-filter-item"\
+								:class="{ disabled: !f.enabled, \'lmp-drop-above\': dropId === \'filter:\' + f.id && dropPos === \'before\', \'lmp-drop-below\': dropId === \'filter:\' + f.id && dropPos === \'after\' }"\
+								draggable="true"\
+								@dragstart="startDragFilter($event, f.id)"\
+								@dragover.prevent="dragOverFilter($event, f.id)"\
+								@dragleave="onDragLeave($event)"\
+								@drop.prevent="dropOnFilter($event, f.id)"\
+								@dragend="dragEnd">\
+								<i class="material-icons lmp-drag-handle" style="font-size:14px;" @mousedown.stop>drag_indicator</i>\
 								<button class="lmp-btn" @click="toggleFilterEnable(f.id)" :title="f.enabled ? \'Disable\' : \'Enable\'">\
 									<i class="material-icons">{{ f.enabled ? "visibility" : "visibility_off" }}</i>\
 								</button>\
 								<span class="lmp-filter-name">{{ filterLabel(f.name) }}</span>\
 								<input type="range" class="lmp-filter-intensity" min="0" max="100" step="1" :value="f.intensity" @input="onFilterIntensity(f.id, $event)" title="Intensity" />\
 								<span class="lmp-filter-pct">{{ f.intensity }}%</span>\
-								<div class="lmp-move-btns">\
-									<button class="lmp-move-btn" :disabled="fi === 0" @click="moveFilterUp(f.id)" title="Move up"><i class="material-icons">arrow_drop_up</i></button>\
-									<button class="lmp-move-btn" :disabled="fi === selectedFilters.length - 1" @click="moveFilterDown(f.id)" title="Move down"><i class="material-icons">arrow_drop_down</i></button>\
-								</div>\
 								<button class="lmp-btn lmp-btn-danger" @click="removeFilter(f.id)" title="Remove filter">\
 									<i class="material-icons">close</i>\
 								</button>\
@@ -850,6 +926,8 @@
 					tick: 0,
 					collapsed: {},
 					filtersExpanded: true,
+					dropId: null,
+					dropPos: null,
 				};
 			},
 			computed: {
@@ -864,7 +942,7 @@
 				},
 				groupNames: function () {
 					this.tick;
-					return layerGroupOrder.slice();
+					return _groupOrder().slice();
 				},
 				currentOpacity: function () {
 					this.tick;
@@ -890,8 +968,8 @@
 
 					var allLayers = tex.layers.slice().reverse();
 					var groupedUUIDs = new Set();
-					for (var gn in layerGroups) {
-						layerGroups[gn].forEach(function (uuid) { groupedUUIDs.add(uuid); });
+					for (var gn in _groups()) {
+						_groups()[gn].forEach(function (uuid) { groupedUUIDs.add(uuid); });
 					}
 
 					var tree = [];
@@ -903,17 +981,17 @@
 							if (!insertedGroups[group]) {
 								var groupLayers = [];
 								var allVisible = true;
-								(layerGroups[group] || []).forEach(function (uuid) {
+								(_groups()[group] || []).forEach(function (uuid) {
 									var l = allLayers.find(function (x) { return x.uuid === uuid; });
 									if (l) {
 										groupLayers.push(l);
 										if (!l.visible) allVisible = false;
 									}
 								});
-								var gi = layerGroupOrder.indexOf(group);
+								var gi = _groupOrder().indexOf(group);
 								tree.push({
 									type: 'group', name: group, layers: groupLayers, allVisible: allVisible,
-									canUp: gi > 0, canDown: gi < layerGroupOrder.length - 1,
+									canUp: gi > 0, canDown: gi < _groupOrder().length - 1,
 								});
 								insertedGroups[group] = true;
 							}
@@ -922,22 +1000,15 @@
 						}
 					});
 
-					// Add empty groups that have no layers yet (in order)
-					layerGroupOrder.forEach(function (name) {
+					_groupOrder().forEach(function (name) {
 						if (!insertedGroups[name]) {
-							var gi = layerGroupOrder.indexOf(name);
+							var gi = _groupOrder().indexOf(name);
 							tree.push({
 								type: 'group', name: name, layers: [], allVisible: true,
-								canUp: gi > 0, canDown: gi < layerGroupOrder.length - 1,
+								canUp: gi > 0, canDown: gi < _groupOrder().length - 1,
 							});
 						}
 					});
-
-					// Add flags for tree-level reordering
-					for (var i = 0; i < tree.length; i++) {
-						tree[i].isFirst = (i === 0);
-						tree[i].isLast = (i === tree.length - 1);
-					}
 
 					return tree;
 				},
@@ -982,7 +1053,6 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					// Remove from any group
 					var gn = getLayerGroupName(layer.uuid);
 					if (gn) removeLayerFromGroup(gn, layer.uuid);
 					layer.remove(true);
@@ -1000,11 +1070,11 @@
 				},
 				renameGroup: function (oldName) {
 					Blockbench.textPrompt('Rename Group', oldName, function (value) {
-						if (value && value !== oldName && !layerGroups[value]) {
-							layerGroups[value] = layerGroups[oldName];
-							delete layerGroups[oldName];
-							var oi = layerGroupOrder.indexOf(oldName);
-							if (oi !== -1) layerGroupOrder[oi] = value;
+						if (value && value !== oldName && !_groups()[value]) {
+							_groups()[value] = _groups()[oldName];
+							delete _groups()[oldName];
+							var oi = _groupOrder().indexOf(oldName);
+							if (oi !== -1) _groupOrder()[oi] = value;
 							updatePanel();
 						}
 					});
@@ -1049,39 +1119,8 @@
 					deleteLayerGroup(groupName);
 					this.tick++;
 				},
-				addToGroup: function (event, layerUUID) {
-					var gn = event.target.value;
-					if (gn) {
-						// Remove from any existing group first
-						var oldGroup = getLayerGroupName(layerUUID);
-						if (oldGroup) removeLayerFromGroup(oldGroup, layerUUID);
-						addLayerToGroup(gn, layerUUID);
-					}
-					event.target.value = '';
-					this.tick++;
-				},
 				removeFromGroup: function (groupName, uuid) {
 					removeLayerFromGroup(groupName, uuid);
-					this.tick++;
-				},
-				moveLayerUp: function (layer) {
-					moveLayerInTexture(layer.uuid, -1);
-					this.tick++;
-				},
-				moveLayerDown: function (layer) {
-					moveLayerInTexture(layer.uuid, 1);
-					this.tick++;
-				},
-				moveLayerInGrp: function (groupName, uuid, dir) {
-					moveLayerInGroup(groupName, uuid, dir);
-					this.tick++;
-				},
-				moveGroupUp: function (name) {
-					moveGroup(name, -1);
-					this.tick++;
-				},
-				moveGroupDown: function (name) {
-					moveGroup(name, 1);
 					this.tick++;
 				},
 				filterLabel: function (name) {
@@ -1105,17 +1144,210 @@
 					removeFilterFromStack(layer.uuid, filterId);
 					this.tick++;
 				},
-				moveFilterUp: function (filterId) {
-					var layer = getSelectedLayer();
-					if (!layer) return;
-					moveFilterInStack(layer.uuid, filterId, -1);
+
+				// ---- Drag & Drop methods ----
+				startDragLayer: function (e, uuid, sourceGroup) {
+					dragInfo.type = 'layer';
+					dragInfo.layerUUID = uuid;
+					dragInfo.sourceGroup = sourceGroup;
+					e.dataTransfer.effectAllowed = 'move';
+					e.dataTransfer.setData('text/plain', 'layer:' + uuid);
+					e.target.classList.add('lmp-dragging');
+				},
+				startDragGroup: function (e, groupName) {
+					dragInfo.type = 'group';
+					dragInfo.groupName = groupName;
+					e.dataTransfer.effectAllowed = 'move';
+					e.dataTransfer.setData('text/plain', 'group:' + groupName);
+				},
+				startDragFilter: function (e, filterId) {
+					dragInfo.type = 'filter';
+					dragInfo.filterId = filterId;
+					e.dataTransfer.effectAllowed = 'move';
+					e.dataTransfer.setData('text/plain', 'filter:' + filterId);
+					e.target.classList.add('lmp-dragging');
+				},
+
+				dragOverLayer: function (e, uuid) {
+					if (dragInfo.type !== 'layer') return;
+					if (dragInfo.layerUUID === uuid) return;
+					this.dropId = uuid;
+					this.dropPos = getDragPos(e, e.currentTarget);
+				},
+				dragOverGroupedLayer: function (e, uuid) {
+					if (dragInfo.type !== 'layer') return;
+					if (dragInfo.layerUUID === uuid) return;
+					this.dropId = uuid;
+					this.dropPos = getDragPos(e, e.currentTarget);
+				},
+				dragOverGroup: function (e, groupName) {
+					if (dragInfo.type === 'layer') {
+						this.dropId = 'group:' + groupName;
+						this.dropPos = getDragPos3(e, e.currentTarget);
+					} else if (dragInfo.type === 'group' && dragInfo.groupName !== groupName) {
+						this.dropId = 'group:' + groupName;
+						this.dropPos = getDragPos(e, e.currentTarget);
+					}
+				},
+				dragOverGroupBody: function (e, groupName) {
+					if (dragInfo.type === 'layer') {
+						this.dropId = 'group:' + groupName;
+						this.dropPos = 'inside';
+					}
+				},
+				dragOverFilter: function (e, filterId) {
+					if (dragInfo.type !== 'filter') return;
+					if (dragInfo.filterId === filterId) return;
+					this.dropId = 'filter:' + filterId;
+					this.dropPos = getDragPos(e, e.currentTarget);
+				},
+				onDragLeave: function (e) {
+					if (!e.currentTarget.contains(e.relatedTarget)) {
+						this.dropId = null;
+						this.dropPos = null;
+					}
+				},
+				dragEnd: function () {
+					dragInfo.type = null;
+					dragInfo.layerUUID = null;
+					dragInfo.sourceGroup = null;
+					dragInfo.groupName = null;
+					dragInfo.filterId = null;
+					this.dropId = null;
+					this.dropPos = null;
+					document.querySelectorAll('.lmp-dragging').forEach(function (el) {
+						el.classList.remove('lmp-dragging');
+					});
 					this.tick++;
 				},
-				moveFilterDown: function (filterId) {
-					var layer = getSelectedLayer();
-					if (!layer) return;
-					moveFilterInStack(layer.uuid, filterId, 1);
-					this.tick++;
+
+				dropOnLayer: function (e, targetUUID) {
+					if (dragInfo.type === 'layer') {
+						var pos = getDragPos(e, e.currentTarget);
+						this._doLayerDrop(dragInfo.layerUUID, dragInfo.sourceGroup, targetUUID, null, pos);
+					}
+					this.dragEnd();
+				},
+				dropOnGroupedLayer: function (e, groupName, targetUUID) {
+					if (dragInfo.type === 'layer') {
+						var pos = getDragPos(e, e.currentTarget);
+						this._doLayerDrop(dragInfo.layerUUID, dragInfo.sourceGroup, targetUUID, groupName, pos);
+					}
+					this.dragEnd();
+				},
+				dropOnGroup: function (e, groupName) {
+					if (dragInfo.type === 'layer') {
+						var pos = getDragPos3(e, e.currentTarget);
+						if (pos === 'inside') {
+							this._doLayerDropIntoGroup(dragInfo.layerUUID, dragInfo.sourceGroup, groupName);
+						} else {
+							this._doLayerDropIntoGroup(dragInfo.layerUUID, dragInfo.sourceGroup, groupName);
+						}
+					} else if (dragInfo.type === 'group' && dragInfo.groupName !== groupName) {
+						var pos = getDragPos(e, e.currentTarget);
+						var fromIdx = _groupOrder().indexOf(dragInfo.groupName);
+						if (fromIdx !== -1) {
+							_groupOrder().splice(fromIdx, 1);
+							var toIdx = _groupOrder().indexOf(groupName);
+							if (toIdx === -1) toIdx = _groupOrder().length - 1;
+							if (pos === 'after') toIdx++;
+							_groupOrder().splice(toIdx, 0, dragInfo.groupName);
+						}
+						updatePanel();
+					}
+					this.dragEnd();
+				},
+				dropOnGroupBody: function (e, groupName) {
+					if (dragInfo.type === 'layer') {
+						this._doLayerDropIntoGroup(dragInfo.layerUUID, dragInfo.sourceGroup, groupName);
+					}
+					this.dragEnd();
+				},
+				dropOnFilter: function (e, targetFilterId) {
+					if (dragInfo.type === 'filter') {
+						var layer = getSelectedLayer();
+						if (layer) {
+							var stack = getFilterStack(layer.uuid);
+							var dragFilter = stack.filters.find(function (f) { return f.id === dragInfo.filterId; });
+							var targetFilter = stack.filters.find(function (f) { return f.id === targetFilterId; });
+							if (dragFilter && targetFilter && dragFilter !== targetFilter) {
+								var pos = getDragPos(e, e.currentTarget);
+								var fromIdx = stack.filters.indexOf(dragFilter);
+								stack.filters.splice(fromIdx, 1);
+								var toIdx = stack.filters.indexOf(targetFilter);
+								if (pos === 'after') toIdx++;
+								stack.filters.splice(toIdx, 0, dragFilter);
+								recomputeFilters(layer);
+							}
+						}
+					}
+					this.dragEnd();
+				},
+
+				_doLayerDrop: function (dragUUID, sourceGroup, targetUUID, targetGroup, position) {
+					if (dragUUID === targetUUID) return;
+					var tex = getSelectedTexture();
+					if (!tex) return;
+
+					// Remove from source group
+					if (sourceGroup) {
+						var srcArr = _groups()[sourceGroup];
+						if (srcArr) {
+							var si = srcArr.indexOf(dragUUID);
+							if (si !== -1) srcArr.splice(si, 1);
+						}
+					}
+
+					if (targetGroup) {
+						// Dropping into a group
+						var tgtArr = _groups()[targetGroup];
+						if (!tgtArr) return;
+						var ei = tgtArr.indexOf(dragUUID);
+						if (ei !== -1) tgtArr.splice(ei, 1);
+						var ti = tgtArr.indexOf(targetUUID);
+						if (ti === -1) ti = tgtArr.length - 1;
+						if (position === 'after') ti++;
+						tgtArr.splice(ti, 0, dragUUID);
+					} else {
+						// Remove from any group the layer might be in
+						var existingGroup = getLayerGroupName(dragUUID);
+						if (existingGroup) {
+							var arr = _groups()[existingGroup];
+							if (arr) {
+								var ri = arr.indexOf(dragUUID);
+								if (ri !== -1) arr.splice(ri, 1);
+							}
+						}
+						// Reorder in tex.layers (bottom-to-top array, display is reversed)
+						var layers = tex.layers;
+						var dragIdx = layers.findIndex(function (l) { return l.uuid === dragUUID; });
+						var targetIdx = layers.findIndex(function (l) { return l.uuid === targetUUID; });
+						if (dragIdx === -1 || targetIdx === -1) return;
+						var layer = layers.splice(dragIdx, 1)[0];
+						targetIdx = layers.findIndex(function (l) { return l.uuid === targetUUID; });
+						// Display is reversed: 'before' in display = above = higher array index
+						var insertIdx = position === 'before' ? targetIdx + 1 : targetIdx;
+						layers.splice(insertIdx, 0, layer);
+						tex.updateLayerChanges(true);
+					}
+					updatePanel();
+				},
+				_doLayerDropIntoGroup: function (dragUUID, sourceGroup, targetGroup) {
+					// Remove from source group
+					if (sourceGroup) {
+						var srcArr = _groups()[sourceGroup];
+						if (srcArr) {
+							var si = srcArr.indexOf(dragUUID);
+							if (si !== -1) srcArr.splice(si, 1);
+						}
+					}
+					// Add to target group
+					var tgtArr = _groups()[targetGroup];
+					if (!tgtArr) return;
+					if (tgtArr.indexOf(dragUUID) === -1) {
+						tgtArr.push(dragUUID);
+					}
+					updatePanel();
 				},
 			},
 		};
@@ -1178,19 +1410,6 @@
 				.lmp-layer-item.selected .lmp-btn:hover { opacity: 1; background: rgba(255,255,255,0.15); }\
 				.lmp-btn-danger:hover { color: #ff6b6b !important; opacity: 1; }\
 				\
-				/* Move buttons */\
-				.lmp-move-btns { display: flex; flex-direction: column; gap: 0; margin: -2px 0; }\
-				.lmp-move-btn { background: none; border: none; cursor: pointer; padding: 0; opacity: 0.35; display: flex; align-items: center; line-height: 1; transition: all 0.12s; border-radius: 2px; }\
-				.lmp-move-btn:hover:not(:disabled) { opacity: 1; background: rgba(255,255,255,0.1); }\
-				.lmp-move-btn:disabled { opacity: 0.12; cursor: default; }\
-				.lmp-move-btn i { font-size: 16px; }\
-				.lmp-layer-item.selected .lmp-move-btn { opacity: 0.6; }\
-				.lmp-layer-item.selected .lmp-move-btn:hover:not(:disabled) { opacity: 1; }\
-				.lmp-group-header .lmp-move-btns { margin: -3px 0; }\
-				\
-				/* Group select on ungrouped layers */\
-				.lmp-group-select { background: var(--color-button); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 3px; font-size: 10px; padding: 1px 2px; max-width: 65px; cursor: pointer; }\
-				.lmp-layer-item.selected .lmp-group-select { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: inherit; }\
 				\
 				/* Groups */\
 				.lmp-group { margin-bottom: 3px; border-radius: 5px; overflow: hidden; border: 1px solid var(--color-border); background: var(--color-back); }\
@@ -1227,6 +1446,18 @@
 				.lmp-filter-name { flex: 0 0 auto; font-size: 11px; min-width: 70px; white-space: nowrap; }\
 				.lmp-filter-intensity { flex: 1; height: 12px; min-width: 40px; cursor: pointer; }\
 				.lmp-filter-pct { font-size: 10px; min-width: 28px; text-align: right; opacity: 0.6; }\
+				\
+				/* Drag & Drop */\
+				.lmp-drag-handle { font-size: 14px; opacity: 0.25; cursor: grab; flex-shrink: 0; transition: opacity 0.12s; }\
+				.lmp-drag-handle:hover { opacity: 0.7; }\
+				.lmp-layer-item.selected .lmp-drag-handle { opacity: 0.5; }\
+				.lmp-group-header .lmp-drag-handle { opacity: 0.3; }\
+				.lmp-group-header .lmp-drag-handle:hover { opacity: 0.7; }\
+				.lmp-dragging { opacity: 0.35 !important; }\
+				.lmp-drop-above { border-top: 2px solid var(--color-accent) !important; }\
+				.lmp-drop-below { border-bottom: 2px solid var(--color-accent) !important; }\
+				.lmp-drop-inside { background: color-mix(in srgb, var(--color-accent) 30%, var(--color-button)) !important; }\
+				.lmp-group-empty { padding: 10px; text-align: center; font-size: 11px; opacity: 0.35; font-style: italic; }\
 				\
 				/* Empty state */\
 				.lmp-empty { padding: 20px 12px; text-align: center; opacity: 0.5; font-size: 12px; }\
