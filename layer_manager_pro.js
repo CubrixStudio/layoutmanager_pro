@@ -14,10 +14,25 @@
 	let codecCompileCb = null;
 	let codecParseCb = null;
 
-	// Track locked layers and layer groups (folders)
-	const lockedLayers = new Set();
-	const layerGroups = {}; // { groupName: [layerUUIDs] }
-	const layerGroupOrder = []; // ordered group names
+	// Per-texture data: groups, group order, and locks (independent per texture)
+	const perTextureData = {}; // { textureUUID: { groups: {}, groupOrder: [], locks: Set } }
+
+	function getTexData(texUUID) {
+		if (!texUUID) {
+			var tex = getSelectedTexture();
+			if (!tex) return { groups: {}, groupOrder: [], locks: new Set() };
+			texUUID = tex.uuid;
+		}
+		if (!perTextureData[texUUID]) {
+			perTextureData[texUUID] = { groups: {}, groupOrder: [], locks: new Set() };
+		}
+		return perTextureData[texUUID];
+	}
+
+	// Shorthand accessors for current texture's data
+	function _groups() { return getTexData().groups; }
+	function _groupOrder() { return getTexData().groupOrder; }
+	function _locks() { return getTexData().locks; }
 
 	// ---- Drag & Drop state ----
 	var dragInfo = {
@@ -64,7 +79,7 @@
 
 	function moveLayerInGroup(groupName, layerUUID, direction) {
 		// direction: -1 = up, +1 = down in the displayed list
-		var uuids = layerGroups[groupName];
+		var uuids = _groups()[groupName];
 		if (!uuids) return;
 		var idx = uuids.indexOf(layerUUID);
 		if (idx === -1) return;
@@ -77,13 +92,13 @@
 	}
 
 	function moveGroup(groupName, direction) {
-		var idx = layerGroupOrder.indexOf(groupName);
+		var idx = _groupOrder().indexOf(groupName);
 		if (idx === -1) return;
 		var newIdx = idx + direction;
-		if (newIdx < 0 || newIdx >= layerGroupOrder.length) return;
-		var tmp = layerGroupOrder[idx];
-		layerGroupOrder[idx] = layerGroupOrder[newIdx];
-		layerGroupOrder[newIdx] = tmp;
+		if (newIdx < 0 || newIdx >= _groupOrder().length) return;
+		var tmp = _groupOrder()[idx];
+		_groupOrder()[idx] = _groupOrder()[newIdx];
+		_groupOrder()[newIdx] = tmp;
 		updatePanel();
 	}
 
@@ -237,7 +252,7 @@
 	}
 
 	function isLayerLocked(layer) {
-		return layer && lockedLayers.has(layer.uuid);
+		return layer && _locks().has(layer.uuid);
 	}
 
 	function ensureLayersEnabled(texture) {
@@ -253,48 +268,48 @@
 	function createLayerGroup(name) {
 		if (!name) {
 			Blockbench.textPrompt('New Layer Group', 'Group 1', function (value) {
-				if (value && !layerGroups[value]) {
-					layerGroups[value] = [];
-					layerGroupOrder.push(value);
+				if (value && !_groups()[value]) {
+					_groups()[value] = [];
+					_groupOrder().push(value);
 					Blockbench.showQuickMessage('Created group: ' + value, 1500);
 					updatePanel();
 				}
 			});
-		} else if (!layerGroups[name]) {
-			layerGroups[name] = [];
-			layerGroupOrder.push(name);
+		} else if (!_groups()[name]) {
+			_groups()[name] = [];
+			_groupOrder().push(name);
 			updatePanel();
 		}
 	}
 
 	function addLayerToGroup(groupName, layerUUID) {
-		if (!layerGroups[groupName]) return;
-		if (layerGroups[groupName].indexOf(layerUUID) === -1) {
-			layerGroups[groupName].push(layerUUID);
+		if (!_groups()[groupName]) return;
+		if (_groups()[groupName].indexOf(layerUUID) === -1) {
+			_groups()[groupName].push(layerUUID);
 		}
 		updatePanel();
 	}
 
 	function removeLayerFromGroup(groupName, layerUUID) {
-		if (!layerGroups[groupName]) return;
-		const idx = layerGroups[groupName].indexOf(layerUUID);
+		if (!_groups()[groupName]) return;
+		const idx = _groups()[groupName].indexOf(layerUUID);
 		if (idx !== -1) {
-			layerGroups[groupName].splice(idx, 1);
+			_groups()[groupName].splice(idx, 1);
 		}
 		updatePanel();
 	}
 
 	function deleteLayerGroup(groupName) {
-		delete layerGroups[groupName];
-		var idx = layerGroupOrder.indexOf(groupName);
-		if (idx !== -1) layerGroupOrder.splice(idx, 1);
+		delete _groups()[groupName];
+		var idx = _groupOrder().indexOf(groupName);
+		if (idx !== -1) _groupOrder().splice(idx, 1);
 		updatePanel();
 	}
 
 	function toggleGroupVisibility(groupName) {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return;
-		const uuids = layerGroups[groupName] || [];
+		const uuids = _groups()[groupName] || [];
 		const layers = tex.layers.filter(function (l) {
 			return uuids.indexOf(l.uuid) !== -1;
 		});
@@ -312,11 +327,11 @@
 
 	function toggleLayerLock(layer) {
 		if (!layer) return;
-		if (lockedLayers.has(layer.uuid)) {
-			lockedLayers.delete(layer.uuid);
+		if (_locks().has(layer.uuid)) {
+			_locks().delete(layer.uuid);
 			Blockbench.showQuickMessage('Layer unlocked: ' + layer.name, 1000);
 		} else {
-			lockedLayers.add(layer.uuid);
+			_locks().add(layer.uuid);
 			Blockbench.showQuickMessage('Layer locked: ' + layer.name, 1000);
 		}
 		updatePanel();
@@ -624,10 +639,21 @@
 	// ---- Persistence (save/load into .bbmodel) ----
 
 	function serializeLmpData() {
+		var perTex = {};
+		for (var texUUID in perTextureData) {
+			var td = perTextureData[texUUID];
+			var hasGroups = Object.keys(td.groups).length > 0;
+			var hasLocks = td.locks.size > 0;
+			if (hasGroups || hasLocks) {
+				perTex[texUUID] = {
+					groups: JSON.parse(JSON.stringify(td.groups)),
+					groupOrder: td.groupOrder.slice(),
+					locks: Array.from(td.locks),
+				};
+			}
+		}
 		return {
-			groups: JSON.parse(JSON.stringify(layerGroups)),
-			groupOrder: layerGroupOrder.slice(),
-			locks: Array.from(lockedLayers),
+			perTexture: perTex,
 			filters: (function () {
 				var out = {};
 				for (var uuid in layerFilterStacks) {
@@ -644,33 +670,47 @@
 	}
 
 	function clearLmpData() {
-		for (var key in layerGroups) delete layerGroups[key];
-		layerGroupOrder.length = 0;
-		lockedLayers.clear();
+		for (var key in perTextureData) delete perTextureData[key];
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
 		filterIdCounter = 0;
+	}
+
+	function _loadTexDataFromSrc(td, src) {
+		if (src.groups) {
+			for (var name in src.groups) {
+				td.groups[name] = src.groups[name].slice();
+			}
+		}
+		if (src.groupOrder && Array.isArray(src.groupOrder)) {
+			src.groupOrder.forEach(function (n) {
+				if (td.groups[n] !== undefined) td.groupOrder.push(n);
+			});
+		}
+		for (var name in td.groups) {
+			if (td.groupOrder.indexOf(name) === -1) td.groupOrder.push(name);
+		}
+		if (src.locks && Array.isArray(src.locks)) {
+			src.locks.forEach(function (uuid) { td.locks.add(uuid); });
+		}
 	}
 
 	function deserializeLmpData(data) {
 		clearLmpData();
 		if (!data) return;
-		if (data.groups) {
-			for (var name in data.groups) {
-				layerGroups[name] = data.groups[name].slice();
+
+		if (data.perTexture) {
+			// New per-texture format
+			for (var texUUID in data.perTexture) {
+				_loadTexDataFromSrc(getTexData(texUUID), data.perTexture[texUUID]);
+			}
+		} else if (data.groups) {
+			// Legacy flat format - assign to current/first texture
+			var tex = getSelectedTexture();
+			if (tex) {
+				_loadTexDataFromSrc(getTexData(tex.uuid), data);
 			}
 		}
-		if (data.groupOrder && Array.isArray(data.groupOrder)) {
-			data.groupOrder.forEach(function (n) {
-				if (layerGroups[n] !== undefined) layerGroupOrder.push(n);
-			});
-		}
-		// Ensure all groups are in the order array
-		for (var name in layerGroups) {
-			if (layerGroupOrder.indexOf(name) === -1) layerGroupOrder.push(name);
-		}
-		if (data.locks && Array.isArray(data.locks)) {
-			data.locks.forEach(function (uuid) { lockedLayers.add(uuid); });
-		}
+
 		if (data.filters) {
 			for (var uuid in data.filters) {
 				var stack = getFilterStack(uuid);
@@ -682,8 +722,6 @@
 						intensity: f.intensity != null ? f.intensity : 100,
 					});
 				});
-				// We need to snapshot original and recompute, but the layer
-				// may not be loaded yet; defer to first panel update
 			}
 		}
 		updatePanel();
@@ -711,8 +749,8 @@
 	}
 
 	function getLayerGroupName(uuid) {
-		for (var name in layerGroups) {
-			if (layerGroups[name].indexOf(uuid) !== -1) return name;
+		for (var name in _groups()) {
+			if (_groups()[name].indexOf(uuid) !== -1) return name;
 		}
 		return null;
 	}
@@ -904,7 +942,7 @@
 				},
 				groupNames: function () {
 					this.tick;
-					return layerGroupOrder.slice();
+					return _groupOrder().slice();
 				},
 				currentOpacity: function () {
 					this.tick;
@@ -930,8 +968,8 @@
 
 					var allLayers = tex.layers.slice().reverse();
 					var groupedUUIDs = new Set();
-					for (var gn in layerGroups) {
-						layerGroups[gn].forEach(function (uuid) { groupedUUIDs.add(uuid); });
+					for (var gn in _groups()) {
+						_groups()[gn].forEach(function (uuid) { groupedUUIDs.add(uuid); });
 					}
 
 					var tree = [];
@@ -943,17 +981,17 @@
 							if (!insertedGroups[group]) {
 								var groupLayers = [];
 								var allVisible = true;
-								(layerGroups[group] || []).forEach(function (uuid) {
+								(_groups()[group] || []).forEach(function (uuid) {
 									var l = allLayers.find(function (x) { return x.uuid === uuid; });
 									if (l) {
 										groupLayers.push(l);
 										if (!l.visible) allVisible = false;
 									}
 								});
-								var gi = layerGroupOrder.indexOf(group);
+								var gi = _groupOrder().indexOf(group);
 								tree.push({
 									type: 'group', name: group, layers: groupLayers, allVisible: allVisible,
-									canUp: gi > 0, canDown: gi < layerGroupOrder.length - 1,
+									canUp: gi > 0, canDown: gi < _groupOrder().length - 1,
 								});
 								insertedGroups[group] = true;
 							}
@@ -962,12 +1000,12 @@
 						}
 					});
 
-					layerGroupOrder.forEach(function (name) {
+					_groupOrder().forEach(function (name) {
 						if (!insertedGroups[name]) {
-							var gi = layerGroupOrder.indexOf(name);
+							var gi = _groupOrder().indexOf(name);
 							tree.push({
 								type: 'group', name: name, layers: [], allVisible: true,
-								canUp: gi > 0, canDown: gi < layerGroupOrder.length - 1,
+								canUp: gi > 0, canDown: gi < _groupOrder().length - 1,
 							});
 						}
 					});
@@ -1032,11 +1070,11 @@
 				},
 				renameGroup: function (oldName) {
 					Blockbench.textPrompt('Rename Group', oldName, function (value) {
-						if (value && value !== oldName && !layerGroups[value]) {
-							layerGroups[value] = layerGroups[oldName];
-							delete layerGroups[oldName];
-							var oi = layerGroupOrder.indexOf(oldName);
-							if (oi !== -1) layerGroupOrder[oi] = value;
+						if (value && value !== oldName && !_groups()[value]) {
+							_groups()[value] = _groups()[oldName];
+							delete _groups()[oldName];
+							var oi = _groupOrder().indexOf(oldName);
+							if (oi !== -1) _groupOrder()[oi] = value;
 							updatePanel();
 						}
 					});
@@ -1207,13 +1245,13 @@
 						}
 					} else if (dragInfo.type === 'group' && dragInfo.groupName !== groupName) {
 						var pos = getDragPos(e, e.currentTarget);
-						var fromIdx = layerGroupOrder.indexOf(dragInfo.groupName);
+						var fromIdx = _groupOrder().indexOf(dragInfo.groupName);
 						if (fromIdx !== -1) {
-							layerGroupOrder.splice(fromIdx, 1);
-							var toIdx = layerGroupOrder.indexOf(groupName);
-							if (toIdx === -1) toIdx = layerGroupOrder.length - 1;
+							_groupOrder().splice(fromIdx, 1);
+							var toIdx = _groupOrder().indexOf(groupName);
+							if (toIdx === -1) toIdx = _groupOrder().length - 1;
 							if (pos === 'after') toIdx++;
-							layerGroupOrder.splice(toIdx, 0, dragInfo.groupName);
+							_groupOrder().splice(toIdx, 0, dragInfo.groupName);
 						}
 						updatePanel();
 					}
@@ -1253,7 +1291,7 @@
 
 					// Remove from source group
 					if (sourceGroup) {
-						var srcArr = layerGroups[sourceGroup];
+						var srcArr = _groups()[sourceGroup];
 						if (srcArr) {
 							var si = srcArr.indexOf(dragUUID);
 							if (si !== -1) srcArr.splice(si, 1);
@@ -1262,7 +1300,7 @@
 
 					if (targetGroup) {
 						// Dropping into a group
-						var tgtArr = layerGroups[targetGroup];
+						var tgtArr = _groups()[targetGroup];
 						if (!tgtArr) return;
 						var ei = tgtArr.indexOf(dragUUID);
 						if (ei !== -1) tgtArr.splice(ei, 1);
@@ -1274,7 +1312,7 @@
 						// Remove from any group the layer might be in
 						var existingGroup = getLayerGroupName(dragUUID);
 						if (existingGroup) {
-							var arr = layerGroups[existingGroup];
+							var arr = _groups()[existingGroup];
 							if (arr) {
 								var ri = arr.indexOf(dragUUID);
 								if (ri !== -1) arr.splice(ri, 1);
@@ -1297,14 +1335,14 @@
 				_doLayerDropIntoGroup: function (dragUUID, sourceGroup, targetGroup) {
 					// Remove from source group
 					if (sourceGroup) {
-						var srcArr = layerGroups[sourceGroup];
+						var srcArr = _groups()[sourceGroup];
 						if (srcArr) {
 							var si = srcArr.indexOf(dragUUID);
 							if (si !== -1) srcArr.splice(si, 1);
 						}
 					}
 					// Add to target group
-					var tgtArr = layerGroups[targetGroup];
+					var tgtArr = _groups()[targetGroup];
 					if (!tgtArr) return;
 					if (tgtArr.indexOf(dragUUID) === -1) {
 						tgtArr.push(dragUUID);
