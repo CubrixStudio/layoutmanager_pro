@@ -8,10 +8,9 @@
 	let mergeVisibleAction;
 	let flattenLayersAction;
 	let toggleLockAction;
-	let layerOpacitySlider;
-	let blendModeSelect;
-	let layerFilterSelect;
 	let css;
+	let updateInterval;
+	const eventListeners = [];
 
 	// Track locked layers and layer groups (folders)
 	const lockedLayers = new Set();
@@ -422,7 +421,7 @@
 
 	function updatePanel() {
 		if (layerPanel && layerPanel.inside_vue) {
-			layerPanel.inside_vue.$forceUpdate();
+			layerPanel.inside_vue.tick++;
 		}
 	}
 
@@ -809,11 +808,41 @@
 			MenuBar.addAction(toggleLockAction, 'texture');
 
 			// Listen for texture/layer changes to keep panel updated
-			Blockbench.on('select_texture', function () { updatePanel(); });
-			Blockbench.on('update_texture_selection', function () { updatePanel(); });
+			function onUpdate() { updatePanel(); }
+			var events = [
+				'select_texture',
+				'update_texture_selection',
+				'add_texture',
+				'finish_edit',
+				'undo',
+				'redo',
+				'select_mode',
+				'update_selection'
+			];
+			events.forEach(function (evt) {
+				Blockbench.on(evt, onUpdate);
+				eventListeners.push({ event: evt, fn: onUpdate });
+			});
+
+			// Periodic fallback update to catch any missed state changes
+			updateInterval = setInterval(function () {
+				updatePanel();
+			}, 500);
 		},
 
 		onunload: function () {
+			// Remove event listeners
+			eventListeners.forEach(function (entry) {
+				Blockbench.removeListener(entry.event, entry.fn);
+			});
+			eventListeners.length = 0;
+
+			// Clear interval
+			if (updateInterval) {
+				clearInterval(updateInterval);
+				updateInterval = null;
+			}
+
 			if (css) css.delete();
 			if (layerPanel) layerPanel.delete();
 			if (addLayerAction) addLayerAction.delete();
