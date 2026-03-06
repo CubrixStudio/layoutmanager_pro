@@ -11,6 +11,8 @@
 	let css;
 	let updateInterval;
 	const eventListeners = [];
+	let codecCompileCb = null;
+	let codecParseCb = null;
 
 	// Track locked layers and layer groups (folders)
 	const lockedLayers = new Set();
@@ -594,6 +596,87 @@
 				}
 			}
 		}
+	}
+
+	// ---- Persistence (save/load into .bbmodel) ----
+
+	function serializeLmpData() {
+		return {
+			groups: JSON.parse(JSON.stringify(layerGroups)),
+			groupOrder: layerGroupOrder.slice(),
+			locks: Array.from(lockedLayers),
+			filters: (function () {
+				var out = {};
+				for (var uuid in layerFilterStacks) {
+					var stack = layerFilterStacks[uuid];
+					if (stack.filters.length > 0) {
+						out[uuid] = stack.filters.map(function (f) {
+							return { name: f.name, enabled: f.enabled, intensity: f.intensity };
+						});
+					}
+				}
+				return out;
+			})(),
+		};
+	}
+
+	function clearLmpData() {
+		for (var key in layerGroups) delete layerGroups[key];
+		layerGroupOrder.length = 0;
+		lockedLayers.clear();
+		for (var key in layerFilterStacks) delete layerFilterStacks[key];
+		filterIdCounter = 0;
+	}
+
+	function deserializeLmpData(data) {
+		clearLmpData();
+		if (!data) return;
+		if (data.groups) {
+			for (var name in data.groups) {
+				layerGroups[name] = data.groups[name].slice();
+			}
+		}
+		if (data.groupOrder && Array.isArray(data.groupOrder)) {
+			data.groupOrder.forEach(function (n) {
+				if (layerGroups[n] !== undefined) layerGroupOrder.push(n);
+			});
+		}
+		// Ensure all groups are in the order array
+		for (var name in layerGroups) {
+			if (layerGroupOrder.indexOf(name) === -1) layerGroupOrder.push(name);
+		}
+		if (data.locks && Array.isArray(data.locks)) {
+			data.locks.forEach(function (uuid) { lockedLayers.add(uuid); });
+		}
+		if (data.filters) {
+			for (var uuid in data.filters) {
+				var stack = getFilterStack(uuid);
+				data.filters[uuid].forEach(function (f) {
+					stack.filters.push({
+						id: ++filterIdCounter,
+						name: f.name,
+						enabled: f.enabled !== false,
+						intensity: f.intensity != null ? f.intensity : 100,
+					});
+				});
+				// We need to snapshot original and recompute, but the layer
+				// may not be loaded yet; defer to first panel update
+			}
+		}
+		updatePanel();
+	}
+
+	// Reapply filter stacks after project is fully loaded
+	function reapplyAllFilterStacks() {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return;
+		tex.layers.forEach(function (layer) {
+			var stack = layerFilterStacks[layer.uuid];
+			if (stack && stack.filters.length > 0 && !stack.original) {
+				snapshotOriginal(layer);
+				recomputeFilters(layer);
+			}
+		});
 	}
 
 	// ---- Panel UI ----
@@ -1229,6 +1312,43 @@
 			MenuBar.addAction(flattenLayersAction, 'texture');
 			MenuBar.addAction(toggleLockAction, 'texture');
 
+			// ---- Persistence: hook into codec save/load ----
+
+			// Compile: inject LMP data into project JSON on save
+			codecCompileCb = function (e) {
+				if (e.model) {
+					e.model.layer_manager_pro = serializeLmpData();
+				}
+			};
+			// Parse: read LMP data from project JSON on load
+			codecParseCb = function (e) {
+				if (e.model && e.model.layer_manager_pro) {
+					deserializeLmpData(e.model.layer_manager_pro);
+					// Defer filter reapplication until textures are fully loaded
+					setTimeout(reapplyAllFilterStacks, 200);
+				} else {
+					clearLmpData();
+				}
+				updatePanel();
+			};
+
+			// Hook into all available codecs that handle .bbmodel
+			var codecNames = ['project', 'bedrock', 'bedrock_old', 'java_block'];
+			codecNames.forEach(function (name) {
+				if (Codecs[name]) {
+					Codecs[name].on('compile', codecCompileCb);
+					Codecs[name].on('parse', codecParseCb);
+				}
+			});
+
+			// Also listen for project close/switch to clear state
+			function onNewProject() {
+				clearLmpData();
+				updatePanel();
+			}
+			Blockbench.on('close_project', onNewProject);
+			eventListeners.push({ event: 'close_project', fn: onNewProject });
+
 			// Listen for texture/layer changes to keep panel updated
 			function onUpdate() { updatePanel(); }
 			var events = [
@@ -1259,6 +1379,25 @@
 			});
 			eventListeners.length = 0;
 
+			// Remove codec listeners
+			if (codecCompileCb || codecParseCb) {
+				var codecNames = ['project', 'bedrock', 'bedrock_old', 'java_block'];
+				codecNames.forEach(function (name) {
+					if (Codecs[name] && Codecs[name].events) {
+						if (codecCompileCb && Codecs[name].events.compile) {
+							var ci = Codecs[name].events.compile.indexOf(codecCompileCb);
+							if (ci !== -1) Codecs[name].events.compile.splice(ci, 1);
+						}
+						if (codecParseCb && Codecs[name].events.parse) {
+							var pi = Codecs[name].events.parse.indexOf(codecParseCb);
+							if (pi !== -1) Codecs[name].events.parse.splice(pi, 1);
+						}
+					}
+				});
+				codecCompileCb = null;
+				codecParseCb = null;
+			}
+
 			// Clear interval
 			if (updateInterval) {
 				clearInterval(updateInterval);
@@ -1281,14 +1420,7 @@
 			MenuBar.removeAction('texture.lmp_flatten_layers');
 			MenuBar.removeAction('texture.lmp_toggle_lock');
 
-			lockedLayers.clear();
-			for (var key in layerGroups) {
-				delete layerGroups[key];
-			}
-			layerGroupOrder.length = 0;
-			for (var key in layerFilterStacks) {
-				delete layerFilterStacks[key];
-			}
+			clearLmpData();
 		},
 	});
 })();
