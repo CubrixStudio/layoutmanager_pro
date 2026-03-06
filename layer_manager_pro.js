@@ -425,6 +425,13 @@
 		}
 	}
 
+	function getLayerGroupName(uuid) {
+		for (var name in layerGroups) {
+			if (layerGroups[name].indexOf(uuid) !== -1) return name;
+		}
+		return null;
+	}
+
 	function buildPanelComponent() {
 		return {
 			template: '\
@@ -441,8 +448,8 @@
 					<div v-if="hasTexture && hasLayers" class="lmp-controls">\
 						<div class="lmp-control-row">\
 							<label>Opacity</label>\
-							<input type="range" min="0" max="1" step="0.01" :value="currentOpacity" @input="setOpacity($event)" />\
-							<span>{{ Math.round(currentOpacity * 100) }}%</span>\
+							<input type="range" min="0" max="100" step="1" :value="currentOpacity" @input="setOpacity($event)" />\
+							<span>{{ Math.round(currentOpacity) }}%</span>\
 						</div>\
 						<div class="lmp-control-row">\
 							<label>Blend</label>\
@@ -458,7 +465,7 @@
 						</div>\
 						<div class="lmp-control-row">\
 							<label>Filter</label>\
-							<select @change="applyFilter($event)">\
+							<select @change="onApplyFilter($event)">\
 								<option value="">-- Apply Filter --</option>\
 								<option value="grayscale">Grayscale</option>\
 								<option value="invert">Invert</option>\
@@ -473,42 +480,63 @@
 					</div>\
 					\
 					<div v-if="hasTexture && hasLayers" class="lmp-layer-list">\
-						<div v-for="group in groups" :key="group.name" class="lmp-group">\
-							<div class="lmp-group-header" @click="toggleGroup(group.name)">\
-								<i class="material-icons">folder</i>\
-								<span>{{ group.name }}</span>\
-								<button @click.stop="deleteGroup(group.name)" title="Delete Group"><i class="material-icons" style="font-size:14px">close</i></button>\
-								<button @click.stop="toggleGroupVis(group.name)" title="Toggle Group Visibility"><i class="material-icons" style="font-size:14px">visibility</i></button>\
-							</div>\
-							<div class="lmp-group-layers">\
-								<div v-for="uuid in group.layers" :key="uuid" class="lmp-layer-item lmp-grouped">\
-									<span class="lmp-layer-name">{{ getLayerName(uuid) }}</span>\
-									<button @click="removeFromGroup(group.name, uuid)" title="Remove from group"><i class="material-icons" style="font-size:14px">remove</i></button>\
+						<template v-for="item in layerTree">\
+							\
+							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name) }">\
+								<div class="lmp-group-header" @click="toggleCollapse(item.name)">\
+									<i class="material-icons lmp-chevron">{{ isCollapsed(item.name) ? "chevron_right" : "expand_more" }}</i>\
+									<i class="material-icons lmp-folder-icon">{{ isCollapsed(item.name) ? "folder" : "folder_open" }}</i>\
+									<span class="lmp-group-name" @dblclick.stop="renameGroup(item.name)">{{ item.name }}</span>\
+									<span class="lmp-group-count">{{ item.layers.length }}</span>\
+									<button @click.stop="toggleGroupVis(item.name)" :title="item.allVisible ? \'Hide group\' : \'Show group\'" class="lmp-grp-btn">\
+										<i class="material-icons">{{ item.allVisible ? "visibility" : "visibility_off" }}</i>\
+									</button>\
+									<button @click.stop="deleteGroup(item.name)" title="Delete group" class="lmp-grp-btn">\
+										<i class="material-icons">close</i>\
+									</button>\
+								</div>\
+								<div v-if="!isCollapsed(item.name)" class="lmp-group-body">\
+									<div v-for="layer in item.layers" :key="layer.uuid"\
+										class="lmp-layer-item lmp-grouped"\
+										:class="{ selected: isSelected(layer), locked: isLocked(layer) }"\
+										@click="selectLayer(layer)">\
+										<button class="lmp-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
+											<i class="material-icons">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
+										</button>\
+										<span class="lmp-layer-name" @dblclick.stop="renameLayer(layer)">{{ layer.name }}</span>\
+										<button class="lmp-btn" @click.stop="toggleLock(layer)" :title="isLocked(layer) ? \'Unlock\' : \'Lock\'">\
+											<i class="material-icons">{{ isLocked(layer) ? "lock" : "lock_open" }}</i>\
+										</button>\
+										<button class="lmp-btn" @click.stop="removeFromGroup(item.name, layer.uuid)" title="Remove from group">\
+											<i class="material-icons">logout</i>\
+										</button>\
+										<button class="lmp-btn lmp-btn-danger" @click.stop="deleteLayer(layer)" title="Delete">\
+											<i class="material-icons">delete</i>\
+										</button>\
+									</div>\
 								</div>\
 							</div>\
-						</div>\
-						\
-						<div v-for="layer in layers" :key="layer.uuid" \
-							class="lmp-layer-item" \
-							:class="{ selected: isSelected(layer), locked: isLocked(layer) }" \
-							@click="selectLayer(layer)">\
-							<button class="lmp-vis-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
-								<i class="material-icons" style="font-size:16px">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
-							</button>\
-							<span class="lmp-layer-name" @dblclick="renameLayer(layer)">{{ layer.name }}</span>\
-							<button class="lmp-lock-btn" @click.stop="toggleLock(layer)" :title="isLocked(layer) ? \'Unlock\' : \'Lock\'">\
-								<i class="material-icons" style="font-size:16px">{{ isLocked(layer) ? "lock" : "lock_open" }}</i>\
-							</button>\
-							<button class="lmp-del-btn" @click.stop="deleteLayer(layer)" title="Delete Layer">\
-								<i class="material-icons" style="font-size:16px">delete</i>\
-							</button>\
-							<div class="lmp-layer-actions">\
-								<select @change="addToGroup($event, layer.uuid)" @click.stop title="Add to group">\
+							\
+							<div v-else :key="\'l-\' + item.layer.uuid"\
+								class="lmp-layer-item"\
+								:class="{ selected: isSelected(item.layer), locked: isLocked(item.layer) }"\
+								@click="selectLayer(item.layer)">\
+								<button class="lmp-btn" @click.stop="toggleVis(item.layer)" :title="item.layer.visible ? \'Hide\' : \'Show\'">\
+									<i class="material-icons">{{ item.layer.visible ? "visibility" : "visibility_off" }}</i>\
+								</button>\
+								<span class="lmp-layer-name" @dblclick.stop="renameLayer(item.layer)">{{ item.layer.name }}</span>\
+								<button class="lmp-btn" @click.stop="toggleLock(item.layer)" :title="isLocked(item.layer) ? \'Unlock\' : \'Lock\'">\
+									<i class="material-icons">{{ isLocked(item.layer) ? "lock" : "lock_open" }}</i>\
+								</button>\
+								<select v-if="groupNames.length" class="lmp-group-select" @change="addToGroup($event, item.layer.uuid)" @click.stop title="Move to group">\
 									<option value="">Group...</option>\
 									<option v-for="gn in groupNames" :key="gn" :value="gn">{{ gn }}</option>\
 								</select>\
+								<button class="lmp-btn lmp-btn-danger" @click.stop="deleteLayer(item.layer)" title="Delete">\
+									<i class="material-icons">delete</i>\
+								</button>\
 							</div>\
-						</div>\
+						</template>\
 					</div>\
 					\
 					<div v-else class="lmp-empty">\
@@ -518,7 +546,10 @@
 				</div>',
 
 			data: function () {
-				return { tick: 0 };
+				return {
+					tick: 0,
+					collapsed: {},
+				};
 			},
 			computed: {
 				hasTexture: function () {
@@ -530,20 +561,6 @@
 					var tex = getSelectedTexture();
 					return tex && tex.layers_enabled && tex.layers.length > 0;
 				},
-				layers: function () {
-					this.tick;
-					var tex = getSelectedTexture();
-					if (!tex || !tex.layers_enabled) return [];
-					return tex.layers.slice().reverse();
-				},
-				groups: function () {
-					this.tick;
-					var result = [];
-					for (var name in layerGroups) {
-						result.push({ name: name, layers: layerGroups[name] });
-					}
-					return result;
-				},
 				groupNames: function () {
 					this.tick;
 					return Object.keys(layerGroups);
@@ -551,12 +568,56 @@
 				currentOpacity: function () {
 					this.tick;
 					var layer = getSelectedLayer();
-					return layer ? layer.opacity : 1;
+					return layer ? layer.opacity : 100;
 				},
 				currentBlendMode: function () {
 					this.tick;
 					var layer = getSelectedLayer();
 					return layer ? layer.blend_mode : 'default';
+				},
+				layerTree: function () {
+					this.tick;
+					var tex = getSelectedTexture();
+					if (!tex || !tex.layers_enabled) return [];
+
+					var allLayers = tex.layers.slice().reverse();
+					var groupedUUIDs = new Set();
+					for (var gn in layerGroups) {
+						layerGroups[gn].forEach(function (uuid) { groupedUUIDs.add(uuid); });
+					}
+
+					var tree = [];
+					var insertedGroups = {};
+
+					allLayers.forEach(function (layer) {
+						var group = getLayerGroupName(layer.uuid);
+						if (group) {
+							if (!insertedGroups[group]) {
+								var groupLayers = [];
+								var allVisible = true;
+								(layerGroups[group] || []).forEach(function (uuid) {
+									var l = allLayers.find(function (x) { return x.uuid === uuid; });
+									if (l) {
+										groupLayers.push(l);
+										if (!l.visible) allVisible = false;
+									}
+								});
+								tree.push({ type: 'group', name: group, layers: groupLayers, allVisible: allVisible });
+								insertedGroups[group] = true;
+							}
+						} else {
+							tree.push({ type: 'layer', layer: layer });
+						}
+					});
+
+					// Add empty groups that have no layers yet
+					for (var name in layerGroups) {
+						if (!insertedGroups[name]) {
+							tree.push({ type: 'group', name: name, layers: [], allVisible: true });
+						}
+					}
+
+					return tree;
 				},
 			},
 			methods: {
@@ -578,6 +639,12 @@
 				isLocked: function (layer) {
 					return isLayerLocked(layer);
 				},
+				isCollapsed: function (groupName) {
+					return !!this.collapsed[groupName];
+				},
+				toggleCollapse: function (groupName) {
+					this.$set(this.collapsed, groupName, !this.collapsed[groupName]);
+				},
 				toggleVis: function (layer) {
 					layer.toggleVisibility();
 					var tex = getSelectedTexture();
@@ -593,6 +660,9 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
+					// Remove from any group
+					var gn = getLayerGroupName(layer.uuid);
+					if (gn) removeLayerFromGroup(gn, layer.uuid);
 					layer.remove(true);
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
@@ -606,6 +676,15 @@
 						}
 					});
 				},
+				renameGroup: function (oldName) {
+					Blockbench.textPrompt('Rename Group', oldName, function (value) {
+						if (value && value !== oldName && !layerGroups[value]) {
+							layerGroups[value] = layerGroups[oldName];
+							delete layerGroups[oldName];
+							updatePanel();
+						}
+					});
+				},
 				setOpacity: function (event) {
 					var layer = getSelectedLayer();
 					if (!layer) return;
@@ -613,7 +692,7 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					layer.opacity = parseFloat(event.target.value);
+					layer.opacity = parseInt(event.target.value, 10);
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
@@ -630,22 +709,13 @@
 					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
 				},
-				applyFilter: function (event) {
+				onApplyFilter: function (event) {
 					var val = event.target.value;
 					if (val) {
 						applyFilter(val);
 						event.target.value = '';
 					}
 					this.tick++;
-				},
-				getLayerName: function (uuid) {
-					var tex = getSelectedTexture();
-					if (!tex) return uuid;
-					var found = tex.layers.find(function (l) { return l.uuid === uuid; });
-					return found ? found.name : '(removed)';
-				},
-				toggleGroup: function () {
-					// Could expand/collapse - for now it's visual
 				},
 				toggleGroupVis: function (groupName) {
 					toggleGroupVisibility(groupName);
@@ -658,6 +728,9 @@
 				addToGroup: function (event, layerUUID) {
 					var gn = event.target.value;
 					if (gn) {
+						// Remove from any existing group first
+						var oldGroup = getLayerGroupName(layerUUID);
+						if (oldGroup) removeLayerFromGroup(oldGroup, layerUUID);
 						addLayerToGroup(gn, layerUUID);
 					}
 					event.target.value = '';
@@ -693,39 +766,70 @@
 		onload: function () {
 			// CSS
 			css = Blockbench.addCSS('\
-				.layer-manager-pro { padding: 4px; }\
-				.lmp-toolbar { display: flex; gap: 2px; margin-bottom: 6px; flex-wrap: wrap; }\
-				.lmp-toolbar button { background: var(--color-button); border: none; padding: 3px 6px; cursor: pointer; border-radius: 3px; display: flex; align-items: center; }\
-				.lmp-toolbar button:hover { background: var(--color-accent); }\
+				.layer-manager-pro { padding: 5px; font-size: 12px; }\
+				\
+				/* Toolbar */\
+				.lmp-toolbar { display: flex; gap: 2px; margin-bottom: 8px; flex-wrap: wrap; }\
+				.lmp-toolbar button { background: var(--color-button); border: none; padding: 4px 7px; cursor: pointer; border-radius: 4px; display: flex; align-items: center; transition: background 0.15s; }\
+				.lmp-toolbar button:hover { background: var(--color-accent); color: var(--color-accent_text); }\
 				.lmp-toolbar button i { font-size: 18px; }\
 				\
-				.lmp-controls { margin-bottom: 6px; }\
-				.lmp-control-row { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }\
-				.lmp-control-row label { min-width: 50px; font-size: 12px; }\
-				.lmp-control-row input[type="range"] { flex: 1; height: 16px; }\
-				.lmp-control-row select { flex: 1; background: var(--color-back); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 3px; padding: 2px; font-size: 11px; }\
-				.lmp-control-row span { font-size: 11px; min-width: 35px; text-align: right; }\
+				/* Controls */\
+				.lmp-controls { margin-bottom: 8px; padding: 6px; background: var(--color-back); border-radius: 5px; border: 1px solid var(--color-border); }\
+				.lmp-control-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }\
+				.lmp-control-row:last-child { margin-bottom: 0; }\
+				.lmp-control-row label { min-width: 46px; font-size: 11px; opacity: 0.8; }\
+				.lmp-control-row input[type="range"] { flex: 1; height: 14px; }\
+				.lmp-control-row select { flex: 1; background: var(--color-button); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 4px; padding: 3px 4px; font-size: 11px; }\
+				.lmp-control-row span { font-size: 11px; min-width: 36px; text-align: right; opacity: 0.7; }\
 				\
-				.lmp-layer-list { max-height: 400px; overflow-y: auto; }\
-				.lmp-layer-item { display: flex; align-items: center; gap: 2px; padding: 3px 4px; border-radius: 3px; cursor: pointer; margin-bottom: 1px; background: var(--color-back); }\
-				.lmp-layer-item:hover { background: var(--color-button); }\
-				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); }\
-				.lmp-layer-item.locked { opacity: 0.7; }\
-				.lmp-layer-item.lmp-grouped { padding-left: 20px; }\
-				.lmp-layer-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\
-				.lmp-layer-item button { background: none; border: none; cursor: pointer; padding: 1px; opacity: 0.7; display: flex; align-items: center; }\
-				.lmp-layer-item button:hover { opacity: 1; }\
-				.lmp-layer-actions select { background: var(--color-back); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 2px; font-size: 10px; padding: 0 2px; max-width: 60px; }\
+				/* Layer list */\
+				.lmp-layer-list { overflow-y: auto; }\
 				\
-				.lmp-group { margin-bottom: 4px; }\
-				.lmp-group-header { display: flex; align-items: center; gap: 4px; padding: 3px 4px; background: var(--color-button); border-radius: 3px; cursor: pointer; }\
-				.lmp-group-header:hover { background: var(--color-accent); }\
-				.lmp-group-header span { flex: 1; font-size: 12px; font-weight: bold; }\
-				.lmp-group-header button { background: none; border: none; cursor: pointer; padding: 1px; opacity: 0.7; display: flex; align-items: center; }\
-				.lmp-group-header button:hover { opacity: 1; }\
-				.lmp-group-layers { padding-left: 4px; }\
+				/* Layer items */\
+				.lmp-layer-item { display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-radius: 4px; cursor: pointer; margin-bottom: 1px; background: var(--color-back); border: 1px solid transparent; transition: all 0.12s; }\
+				.lmp-layer-item:hover { background: var(--color-button); border-color: var(--color-border); }\
+				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-color: var(--color-accent); }\
+				.lmp-layer-item.locked { opacity: 0.55; }\
+				.lmp-layer-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }\
 				\
-				.lmp-empty { padding: 12px; text-align: center; opacity: 0.6; font-size: 12px; }\
+				/* Layer buttons */\
+				.lmp-btn { background: none; border: none; cursor: pointer; padding: 2px; opacity: 0.5; display: flex; align-items: center; border-radius: 3px; transition: all 0.12s; }\
+				.lmp-btn:hover { opacity: 1; background: rgba(255,255,255,0.08); }\
+				.lmp-btn i { font-size: 15px; }\
+				.lmp-layer-item.selected .lmp-btn { opacity: 0.8; }\
+				.lmp-layer-item.selected .lmp-btn:hover { opacity: 1; background: rgba(255,255,255,0.15); }\
+				.lmp-btn-danger:hover { color: #ff6b6b !important; opacity: 1; }\
+				\
+				/* Group select on ungrouped layers */\
+				.lmp-group-select { background: var(--color-button); color: var(--color-text); border: 1px solid var(--color-border); border-radius: 3px; font-size: 10px; padding: 1px 2px; max-width: 65px; cursor: pointer; }\
+				.lmp-layer-item.selected .lmp-group-select { background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.2); color: inherit; }\
+				\
+				/* Groups */\
+				.lmp-group { margin-bottom: 3px; border-radius: 5px; overflow: hidden; border: 1px solid var(--color-border); background: var(--color-back); }\
+				.lmp-group-header { display: flex; align-items: center; gap: 2px; padding: 5px 6px; background: var(--color-button); cursor: pointer; transition: background 0.12s; user-select: none; }\
+				.lmp-group-header:hover { background: color-mix(in srgb, var(--color-accent) 30%, var(--color-button)); }\
+				.lmp-chevron { font-size: 18px; opacity: 0.6; transition: transform 0.15s; }\
+				.lmp-folder-icon { font-size: 16px; opacity: 0.7; color: #ffc107; }\
+				.lmp-group-name { flex: 1; font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }\
+				.lmp-group-count { font-size: 10px; opacity: 0.5; background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 8px; margin-right: 2px; }\
+				.lmp-grp-btn { background: none; border: none; cursor: pointer; padding: 2px; opacity: 0.5; display: flex; align-items: center; border-radius: 3px; transition: all 0.12s; }\
+				.lmp-grp-btn:hover { opacity: 1; background: rgba(255,255,255,0.1); }\
+				.lmp-grp-btn i { font-size: 15px; }\
+				\
+				/* Group body (contains grouped layers) */\
+				.lmp-group-body { padding: 2px 2px 2px 8px; border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-back) 50%, transparent); }\
+				.lmp-group-body .lmp-layer-item { background: transparent; border-color: transparent; margin-bottom: 0; padding-left: 14px; border-left: 2px solid var(--color-border); border-radius: 0 4px 4px 0; }\
+				.lmp-group-body .lmp-layer-item:hover { background: var(--color-button); }\
+				.lmp-group-body .lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-left-color: var(--color-accent); }\
+				\
+				/* Collapsed state */\
+				.lmp-group.collapsed { opacity: 0.85; }\
+				.lmp-group.collapsed .lmp-group-header { border-radius: 0; }\
+				\
+				/* Empty state */\
+				.lmp-empty { padding: 20px 12px; text-align: center; opacity: 0.5; font-size: 12px; }\
+				.lmp-empty p { margin: 0; }\
 			');
 
 			// Panel
