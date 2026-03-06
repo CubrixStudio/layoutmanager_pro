@@ -560,6 +560,85 @@
 		);
 	}
 
+	// ---- Mirror Operations ----
+
+	function mirrorLayerH(layer) {
+		if (!layer || isLayerLocked(layer)) return;
+		var tex = getSelectedTexture();
+		if (!tex) return;
+		var w = layer.canvas.width, h = layer.canvas.height;
+		var imgData = layer.ctx.getImageData(0, 0, w, h);
+		layer.ctx.clearRect(0, 0, w, h);
+		layer.ctx.save();
+		layer.ctx.scale(-1, 1);
+		layer.ctx.drawImage(layer.canvas, 0, 0); // canvas is empty now
+		// Use a temp canvas to flip
+		var tmp = document.createElement('canvas');
+		tmp.width = w; tmp.height = h;
+		var tctx = tmp.getContext('2d');
+		tctx.putImageData(imgData, 0, 0);
+		layer.ctx.clearRect(0, 0, w, h);
+		layer.ctx.save();
+		layer.ctx.translate(w, 0);
+		layer.ctx.scale(-1, 1);
+		layer.ctx.drawImage(tmp, 0, 0);
+		layer.ctx.restore();
+		tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function mirrorLayerV(layer) {
+		if (!layer || isLayerLocked(layer)) return;
+		var tex = getSelectedTexture();
+		if (!tex) return;
+		var w = layer.canvas.width, h = layer.canvas.height;
+		var imgData = layer.ctx.getImageData(0, 0, w, h);
+		var tmp = document.createElement('canvas');
+		tmp.width = w; tmp.height = h;
+		var tctx = tmp.getContext('2d');
+		tctx.putImageData(imgData, 0, 0);
+		layer.ctx.clearRect(0, 0, w, h);
+		layer.ctx.save();
+		layer.ctx.translate(0, h);
+		layer.ctx.scale(1, -1);
+		layer.ctx.drawImage(tmp, 0, 0);
+		layer.ctx.restore();
+		tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	// ---- Layer Preview Thumbnail ----
+
+	function getLayerPreviewDataURL(layer) {
+		if (!layer || !layer.canvas) return '';
+		try {
+			var size = 28;
+			var tmp = document.createElement('canvas');
+			tmp.width = size; tmp.height = size;
+			var tctx = tmp.getContext('2d');
+			// Draw checkerboard background for transparency
+			tctx.fillStyle = '#888';
+			tctx.fillRect(0, 0, size, size);
+			tctx.fillStyle = '#555';
+			for (var y = 0; y < size; y += 4) {
+				for (var x = 0; x < size; x += 4) {
+					if ((x / 4 + y / 4) % 2 === 0) tctx.fillRect(x, y, 4, 4);
+				}
+			}
+			// Scale layer to fit
+			var sw = layer.canvas.width, sh = layer.canvas.height;
+			if (sw > 0 && sh > 0) {
+				var scale = Math.min(size / sw, size / sh);
+				var dw = sw * scale, dh = sh * scale;
+				var dx = (size - dw) / 2, dy = (size - dh) / 2;
+				tctx.drawImage(layer.canvas, 0, 0, sw, sh, dx, dy, dw, dh);
+			}
+			return tmp.toDataURL('image/png');
+		} catch (e) {
+			return '';
+		}
+	}
+
 	// ---- Filter Operations ----
 
 	// Pure filter: applies filter to an ImageData in-place (no layer/texture side effects)
@@ -905,8 +984,10 @@
 										@dragleave="onDragLeave($event)"\
 										@drop.prevent.stop="dropOnGroupedLayer($event, item.name, layer.uuid)"\
 										@dragend="dragEnd"\
-										@click="selectLayer(layer)">\
+										@click="selectLayer(layer)"\
+										@contextmenu.prevent.stop="showLayerContextMenu($event, layer)">\
 										<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
+										<img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" />\
 										<button class="lmp-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
 											<i class="material-icons">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
 										</button>\
@@ -934,8 +1015,10 @@
 								@dragleave="onDragLeave($event)"\
 								@drop.prevent="dropOnLayer($event, item.layer.uuid)"\
 								@dragend="dragEnd"\
-								@click="selectLayer(item.layer)">\
+								@click="selectLayer(item.layer)"\
+								@contextmenu.prevent.stop="showLayerContextMenu($event, item.layer)">\
 								<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
+								<img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" />\
 								<button class="lmp-btn" @click.stop="toggleVis(item.layer)" :title="item.layer.visible ? \'Hide\' : \'Show\'">\
 									<i class="material-icons">{{ item.layer.visible ? "visibility" : "visibility_off" }}</i>\
 								</button>\
@@ -1084,6 +1167,59 @@
 				addLayer: addNewLayer,
 				duplicateLayer: duplicateSelectedLayer,
 				importImage: importImageAsLayer,
+				getPreview: function (layer) {
+					this.tick; // refresh on tick
+					return getLayerPreviewDataURL(layer);
+				},
+				showLayerContextMenu: function (event, layer) {
+					var self = this;
+					var items = [
+						{
+							name: 'Mirror Horizontal',
+							icon: 'swap_horiz',
+							click: function () {
+								mirrorLayerH(layer);
+								self.tick++;
+							}
+						},
+						{
+							name: 'Mirror Vertical',
+							icon: 'swap_vert',
+							click: function () {
+								mirrorLayerV(layer);
+								self.tick++;
+							}
+						},
+						'_',
+						{
+							name: 'Rename',
+							icon: 'edit',
+							click: function () {
+								Blockbench.textPrompt('Rename Layer', layer.name, function (value) {
+									if (value) { layer.name = value; updatePanel(); }
+								});
+							}
+						},
+						{
+							name: isLayerLocked(layer) ? 'Unlock' : 'Lock',
+							icon: isLayerLocked(layer) ? 'lock_open' : 'lock',
+							click: function () {
+								toggleLayerLock(layer);
+								self.tick++;
+							}
+						},
+						'_',
+						{
+							name: 'Delete',
+							icon: 'delete',
+							click: function () {
+								self.deleteLayer(layer);
+							}
+						}
+					];
+					var menu = new Menu(items);
+					menu.open(event);
+				},
 				mergeVisible: mergeVisibleLayers,
 				flattenAll: flattenAllLayers,
 				createGroup: function () {
@@ -1512,6 +1648,7 @@
 				.lmp-layer-item:hover { background: var(--color-button); border-color: var(--color-border); }\
 				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-color: var(--color-accent); }\
 				.lmp-layer-item.locked { opacity: 0.55; }\
+				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; flex-shrink: 0; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); }\
 				.lmp-layer-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }\
 				\
 				/* Layer buttons */\
