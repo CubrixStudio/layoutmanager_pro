@@ -1,0 +1,10 @@
+{
+  "name": "layer-manager-pro",
+  "version": "1.0.0",
+  "description": "Plugin Blockbench pour la gestion avancée des calques : dossiers, verrouillage, filtres",
+  "author": "CubrixStudio",
+  "license": "MIT",
+  "devDependencies": {
+    "blockbench-types": "^4.10.0"
+  }
+}
