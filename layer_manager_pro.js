@@ -252,6 +252,51 @@
 		return Texture.selected || Texture.all[0];
 	}
 
+	// Sync tex.layers order to match treeOrder display
+	// treeOrder is top-to-bottom (visual), tex.layers is bottom-to-top (render)
+	function syncLayerOrder() {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return;
+		var to = _treeOrder();
+		// Build ordered list: walk treeOrder top-to-bottom, expanding groups
+		var orderedUUIDs = [];
+		for (var i = 0; i < to.length; i++) {
+			var entry = to[i];
+			if (entry.indexOf('group:') === 0) {
+				var name = entry.slice(6);
+				var members = _groups()[name];
+				if (members) {
+					for (var j = 0; j < members.length; j++) {
+						orderedUUIDs.push(members[j]);
+					}
+				}
+			} else {
+				orderedUUIDs.push(entry);
+			}
+		}
+		// orderedUUIDs is top-to-bottom visual order
+		// tex.layers should be bottom-to-top, so reverse
+		var layerMap = {};
+		tex.layers.forEach(function (l) { layerMap[l.uuid] = l; });
+		var newLayers = [];
+		for (var i = orderedUUIDs.length - 1; i >= 0; i--) {
+			var l = layerMap[orderedUUIDs[i]];
+			if (l) {
+				newLayers.push(l);
+				delete layerMap[orderedUUIDs[i]];
+			}
+		}
+		// Append any layers not in treeOrder (safety)
+		for (var uuid in layerMap) {
+			newLayers.push(layerMap[uuid]);
+		}
+		tex.layers.length = 0;
+		for (var i = 0; i < newLayers.length; i++) {
+			tex.layers.push(newLayers[i]);
+		}
+		tex.updateLayerChanges(true);
+	}
+
 	function getSelectedLayer() {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return null;
@@ -888,6 +933,7 @@
 	// ---- Panel UI ----
 
 	function updatePanel() {
+		syncLayerOrder();
 		if (layerPanel && layerPanel.inside_vue) {
 			layerPanel.inside_vue.tick++;
 		}
