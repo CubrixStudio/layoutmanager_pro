@@ -612,16 +612,10 @@
 		var tex = getSelectedTexture();
 		if (!tex) return;
 		var w = layer.canvas.width, h = layer.canvas.height;
-		var imgData = layer.ctx.getImageData(0, 0, w, h);
-		layer.ctx.clearRect(0, 0, w, h);
-		layer.ctx.save();
-		layer.ctx.scale(-1, 1);
-		layer.ctx.drawImage(layer.canvas, 0, 0); // canvas is empty now
-		// Use a temp canvas to flip
 		var tmp = document.createElement('canvas');
 		tmp.width = w; tmp.height = h;
 		var tctx = tmp.getContext('2d');
-		tctx.putImageData(imgData, 0, 0);
+		tctx.drawImage(layer.canvas, 0, 0);
 		layer.ctx.clearRect(0, 0, w, h);
 		layer.ctx.save();
 		layer.ctx.translate(w, 0);
@@ -637,11 +631,10 @@
 		var tex = getSelectedTexture();
 		if (!tex) return;
 		var w = layer.canvas.width, h = layer.canvas.height;
-		var imgData = layer.ctx.getImageData(0, 0, w, h);
 		var tmp = document.createElement('canvas');
 		tmp.width = w; tmp.height = h;
 		var tctx = tmp.getContext('2d');
-		tctx.putImageData(imgData, 0, 0);
+		tctx.drawImage(layer.canvas, 0, 0);
 		layer.ctx.clearRect(0, 0, w, h);
 		layer.ctx.save();
 		layer.ctx.translate(0, h);
