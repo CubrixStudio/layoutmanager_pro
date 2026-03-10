@@ -45,6 +45,7 @@
 		var tmp = to[idx];
 		to[idx] = to[newIdx];
 		to[newIdx] = tmp;
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -102,6 +103,7 @@
 		var tmp = uuids[idx];
 		uuids[idx] = uuids[newIdx];
 		uuids[newIdx] = tmp;
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -342,6 +344,7 @@
 		// Remove from treeOrder top-level (now inside a group)
 		var ti = _treeOrder().indexOf(layerUUID);
 		if (ti !== -1) _treeOrder().splice(ti, 1);
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -360,6 +363,7 @@
 				_treeOrder().push(layerUUID);
 			}
 		}
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -375,6 +379,7 @@
 				_treeOrder().splice(gi + i, 0, members[i]);
 			}
 		}
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -612,16 +617,10 @@
 		var tex = getSelectedTexture();
 		if (!tex) return;
 		var w = layer.canvas.width, h = layer.canvas.height;
-		var imgData = layer.ctx.getImageData(0, 0, w, h);
-		layer.ctx.clearRect(0, 0, w, h);
-		layer.ctx.save();
-		layer.ctx.scale(-1, 1);
-		layer.ctx.drawImage(layer.canvas, 0, 0); // canvas is empty now
-		// Use a temp canvas to flip
 		var tmp = document.createElement('canvas');
 		tmp.width = w; tmp.height = h;
 		var tctx = tmp.getContext('2d');
-		tctx.putImageData(imgData, 0, 0);
+		tctx.drawImage(layer.canvas, 0, 0);
 		layer.ctx.clearRect(0, 0, w, h);
 		layer.ctx.save();
 		layer.ctx.translate(w, 0);
@@ -637,11 +636,10 @@
 		var tex = getSelectedTexture();
 		if (!tex) return;
 		var w = layer.canvas.width, h = layer.canvas.height;
-		var imgData = layer.ctx.getImageData(0, 0, w, h);
 		var tmp = document.createElement('canvas');
 		tmp.width = w; tmp.height = h;
 		var tctx = tmp.getContext('2d');
-		tctx.putImageData(imgData, 0, 0);
+		tctx.drawImage(layer.canvas, 0, 0);
 		layer.ctx.clearRect(0, 0, w, h);
 		layer.ctx.save();
 		layer.ctx.translate(0, h);
@@ -914,6 +912,8 @@
 				});
 			}
 		}
+		// Defer sync to allow textures to finish loading
+		setTimeout(function () { syncLayerOrder(); }, 250);
 		updatePanel();
 	}
 
@@ -933,7 +933,6 @@
 	// ---- Panel UI ----
 
 	function updatePanel() {
-		syncLayerOrder();
 		if (layerPanel && layerPanel.inside_vue) {
 			layerPanel.inside_vue.tick++;
 		}
@@ -1495,6 +1494,7 @@
 							if (pos === 'after') toIdx++;
 							_treeOrder().splice(toIdx, 0, fromEntry);
 						}
+						syncLayerOrder();
 						updatePanel();
 					}
 					this.dragEnd();
@@ -1532,6 +1532,7 @@
 							if (gi === -1) gi = _treeOrder().length - 1;
 							if (pos === 'after') gi++;
 							_treeOrder().splice(gi, 0, dragUUID);
+							syncLayerOrder();
 							updatePanel();
 						}
 					} else if (dragInfo.type === 'group' && dragInfo.groupName !== groupName) {
@@ -1545,6 +1546,7 @@
 							if (pos === 'after') toIdx++;
 							_treeOrder().splice(toIdx, 0, fromEntry);
 						}
+						syncLayerOrder();
 						updatePanel();
 					}
 					this.dragEnd();
@@ -1621,6 +1623,7 @@
 						if (position === 'after') ti++;
 						_treeOrder().splice(ti, 0, dragUUID);
 					}
+					syncLayerOrder();
 					updatePanel();
 				},
 				_doLayerDropIntoGroup: function (dragUUID, sourceGroup, targetGroup) {
@@ -1641,6 +1644,7 @@
 					if (tgtArr.indexOf(dragUUID) === -1) {
 						tgtArr.push(dragUUID);
 					}
+					syncLayerOrder();
 					updatePanel();
 				},
 			},
