@@ -717,7 +717,7 @@
 
 	// ---- PSD Encoder / Decoder ----
 
-	function buildPSD(layers, docW, docH) {
+	function buildPSD(layers, docW, docH, groupInfo) {
 		var parts = [];
 		function w8(v) { var b = Buffer.alloc(1); b.writeUInt8(v); parts.push(b); }
 		function wi16(v) { var b = Buffer.alloc(2); b.writeInt16BE(v); parts.push(b); }
@@ -734,24 +734,83 @@
 		layers = layers.filter(function (l) { return l.canvas && l.canvas.width > 0 && l.canvas.height > 0; });
 		if (layers.length === 0) throw new Error('No valid layers to export');
 
-		// Prepare layer channel data
-		var lds = layers.map(function (layer, i) {
-			var w = layer.canvas.width, h = layer.canvas.height;
-			var px = layer.ctx.getImageData(0, 0, w, h).data;
-			var n = w * h;
-			var R = Buffer.alloc(n), G = Buffer.alloc(n), B = Buffer.alloc(n), A = Buffer.alloc(n);
-			for (var p = 0; p < n; p++) {
-				R[p] = px[p * 4]; G[p] = px[p * 4 + 1]; B[p] = px[p * 4 + 2]; A[p] = px[p * 4 + 3];
+		// Build PSD entry list with group markers if groupInfo provided
+		// groupInfo: { treeOrder: [...], groups: { name: [uuid,...] } }
+		// PSD layers are stored bottom-to-top; groups use lsct section dividers
+		var entries = []; // { type: 'layer'|'group_start'|'group_end', layer?, name? }
+		if (groupInfo && groupInfo.treeOrder) {
+			var layerMap = {};
+			layers.forEach(function (l) { layerMap[l.uuid] = l; });
+			// Walk treeOrder top-to-bottom, build visual order
+			var visual = [];
+			for (var i = 0; i < groupInfo.treeOrder.length; i++) {
+				var entry = groupInfo.treeOrder[i];
+				if (entry.indexOf('group:') === 0) {
+					var gname = entry.slice(6);
+					var members = groupInfo.groups[gname] || [];
+					visual.push({ type: 'group_start', name: gname });
+					for (var j = 0; j < members.length; j++) {
+						var ml = layerMap[members[j]];
+						if (ml) { visual.push({ type: 'layer', layer: ml }); delete layerMap[members[j]]; }
+					}
+					visual.push({ type: 'group_end', name: gname });
+				} else {
+					var ul = layerMap[entry];
+					if (ul) { visual.push({ type: 'layer', layer: ul }); delete layerMap[entry]; }
+				}
 			}
-			var ox = layer.offset ? layer.offset[0] : 0;
-			var oy = layer.offset ? layer.offset[1] : 0;
-			var nb = Buffer.from(layer.name || 'Layer ' + i, 'utf8');
-			if (nb.length > 255) nb = nb.slice(0, 255);
-			var npl = Math.ceil((1 + nb.length) / 4) * 4;
-			return { w: w, h: h, ox: ox, oy: oy, R: R, G: G, B: B, A: A, nb: nb, npl: npl,
-				op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
-				vis: layer.visible !== false };
-		});
+			// Add any remaining layers not in treeOrder
+			for (var uuid in layerMap) {
+				visual.push({ type: 'layer', layer: layerMap[uuid] });
+			}
+			// Reverse to get bottom-to-top (PSD order)
+			entries = visual.reverse();
+		} else {
+			// No groups, flat list (already bottom-to-top from tex.layers)
+			for (var i = 0; i < layers.length; i++) {
+				entries.push({ type: 'layer', layer: layers[i] });
+			}
+		}
+
+		// Prepare PSD record data for each entry
+		var lds = [];
+		for (var ei = 0; ei < entries.length; ei++) {
+			var e = entries[ei];
+			if (e.type === 'layer') {
+				var layer = e.layer;
+				var w = layer.canvas.width, h = layer.canvas.height;
+				var px = layer.ctx.getImageData(0, 0, w, h).data;
+				var n = w * h;
+				var R = Buffer.alloc(n), G = Buffer.alloc(n), B = Buffer.alloc(n), A = Buffer.alloc(n);
+				for (var p = 0; p < n; p++) {
+					R[p] = px[p * 4]; G[p] = px[p * 4 + 1]; B[p] = px[p * 4 + 2]; A[p] = px[p * 4 + 3];
+				}
+				var ox = layer.offset ? layer.offset[0] : 0;
+				var oy = layer.offset ? layer.offset[1] : 0;
+				var nb = Buffer.from(layer.name || 'Layer ' + ei, 'utf8');
+				if (nb.length > 255) nb = nb.slice(0, 255);
+				var npl = Math.ceil((1 + nb.length) / 4) * 4;
+				lds.push({ kind: 'layer', w: w, h: h, ox: ox, oy: oy, R: R, G: G, B: B, A: A, nb: nb, npl: npl,
+					op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
+					vis: layer.visible !== false, lsct: -1 });
+			} else if (e.type === 'group_end') {
+				// In PSD bottom-to-top: group_end = bounding section divider (lsct type 3)
+				// This comes first (bottom) for the group
+				var gnb = Buffer.from(e.name, 'utf8');
+				if (gnb.length > 255) gnb = gnb.slice(0, 255);
+				var gnpl = Math.ceil((1 + gnb.length) / 4) * 4;
+				lds.push({ kind: 'group_open', w: 0, h: 0, ox: 0, oy: 0, nb: gnb, npl: gnpl,
+					op: 255, vis: true, lsct: 1 }); // lsct=1: open folder
+			} else if (e.type === 'group_start') {
+				// In PSD bottom-to-top: group_start = bounding divider (appears at top = last in bottom-to-top)
+				var dnb = Buffer.from('</Layer group>', 'utf8');
+				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
+				lds.push({ kind: 'group_end', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
+					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
+			}
+		}
+
+		var totalRecords = lds.length;
 
 		// Header
 		wstr('8BPS'); wu16(1); wbuf(Buffer.alloc(6)); wu16(4);
@@ -762,26 +821,55 @@
 		// Layer and Mask Info
 		var lmiIdx = ph32(); var lmiStart = pos();
 		var liIdx = ph32(); var liStart = pos();
-		wi16(-layers.length);
+		wi16(-totalRecords);
 
 		// Layer records
 		for (var i = 0; i < lds.length; i++) {
-			var d = lds[i]; var cdl = 2 + d.w * d.h;
-			wi32(d.oy); wi32(d.ox); wi32(d.oy + d.h); wi32(d.ox + d.w);
-			wu16(4);
-			wi16(-1); wu32(cdl); wi16(0); wu32(cdl); wi16(1); wu32(cdl); wi16(2); wu32(cdl);
-			wstr('8BIM'); wstr('norm');
-			w8(d.op); w8(0); w8(d.vis ? 0 : 2); w8(0);
-			wu32(4 + 4 + d.npl); wu32(0); wu32(0);
-			w8(d.nb.length); wbuf(d.nb);
-			var pad = d.npl - 1 - d.nb.length;
-			if (pad > 0) wbuf(Buffer.alloc(pad));
+			var d = lds[i];
+			if (d.kind === 'layer') {
+				var cdl = 2 + d.w * d.h;
+				wi32(d.oy); wi32(d.ox); wi32(d.oy + d.h); wi32(d.ox + d.w);
+				wu16(4);
+				wi16(-1); wu32(cdl); wi16(0); wu32(cdl); wi16(1); wu32(cdl); wi16(2); wu32(cdl);
+				wstr('8BIM'); wstr('norm');
+				w8(d.op); w8(0); w8(d.vis ? 0 : 2); w8(0);
+				wu32(4 + 4 + d.npl); wu32(0); wu32(0);
+				w8(d.nb.length); wbuf(d.nb);
+				var pad = d.npl - 1 - d.nb.length;
+				if (pad > 0) wbuf(Buffer.alloc(pad));
+			} else {
+				// Group marker (open folder or bounding divider)
+				// Empty 1x1 transparent layer with lsct additional info
+				wi32(0); wi32(0); wi32(0); wi32(0); // zero rect
+				wu16(4);
+				wi16(-1); wu32(2); wi16(0); wu32(2); wi16(1); wu32(2); wi16(2); wu32(2); // minimal channel data (compression only)
+				wstr('8BIM'); wstr(d.lsct === 3 ? 'norm' : 'pass'); // pass-through for folder
+				w8(d.op); w8(0); w8(0); w8(0);
+				// Extra data: mask(4) + blending(4) + name(npl) + lsct(8+12)
+				var lsctLen = 8 + 12; // '8BIM' + 'lsct' + length(4) + type(4) + '8BIM' + 'pass'/'norm'
+				wu32(4 + 4 + d.npl + lsctLen);
+				wu32(0); wu32(0); // mask + blending ranges
+				w8(d.nb.length); wbuf(d.nb);
+				var pad = d.npl - 1 - d.nb.length;
+				if (pad > 0) wbuf(Buffer.alloc(pad));
+				// lsct additional layer information
+				wstr('8BIM'); wstr('lsct');
+				wu32(12); // data length: type(4) + sig(4) + blend(4)
+				wu32(d.lsct); // section type
+				wstr('8BIM');
+				wstr(d.lsct === 3 ? 'norm' : 'pass');
+			}
 		}
 
 		// Channel data
 		for (var i = 0; i < lds.length; i++) {
 			var d = lds[i];
-			wu16(0); wbuf(d.A); wu16(0); wbuf(d.R); wu16(0); wbuf(d.G); wu16(0); wbuf(d.B);
+			if (d.kind === 'layer') {
+				wu16(0); wbuf(d.A); wu16(0); wbuf(d.R); wu16(0); wbuf(d.G); wu16(0); wbuf(d.B);
+			} else {
+				// Group markers: minimal empty channel data (compression type 0, no pixels)
+				wu16(0); wu16(0); wu16(0); wu16(0);
+			}
 		}
 
 		var liLen = pos() - liStart;
@@ -964,9 +1052,15 @@
 		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
 		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
 
+		var td = getTexData();
+		var groupInfo = {
+			treeOrder: td.treeOrder.slice(),
+			groups: JSON.parse(JSON.stringify(td.groups))
+		};
+
 		var psdBuf;
 		try {
-			psdBuf = buildPSD(tex.layers, tex.width, tex.height);
+			psdBuf = buildPSD(tex.layers, tex.width, tex.height, groupInfo);
 		} catch (e) {
 			console.error('LMP: buildPSD failed:', e);
 			Blockbench.showQuickMessage('Error building PSD: ' + e.message, 3000);
