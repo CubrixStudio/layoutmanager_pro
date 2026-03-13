@@ -1198,12 +1198,17 @@
 					}
 
 					// Auto-add layers not yet tracked in treeOrder
+					var untracked = [];
 					allLayers.forEach(function (l) {
 						if (!seenUUIDs.has(l.uuid) && !getLayerGroupName(l.uuid)) {
-							tree.unshift({ type: 'layer', layer: l });
-							to.unshift(l.uuid);
+							untracked.push(l);
 						}
 					});
+					// Prepend in correct visual order (reverse iterate + unshift)
+					for (var u = untracked.length - 1; u >= 0; u--) {
+						tree.unshift({ type: 'layer', layer: untracked[u] });
+						to.unshift(untracked[u].uuid);
+					}
 
 					return tree;
 				},
