@@ -610,6 +610,111 @@
 		);
 	}
 
+	// ---- Edit in External Editor (Photoshop link) ----
+
+	var externalEdits = {}; // { layerUUID: { path, watcher, texUUID } }
+
+	function editLayerExternal(layer) {
+		if (!layer) return;
+		var tex = getSelectedTexture();
+		if (!tex) return;
+		var uuid = layer.uuid;
+
+		// If already being edited externally, just re-open the file
+		if (externalEdits[uuid]) {
+			require('electron').shell.openPath(externalEdits[uuid].path);
+			Blockbench.showQuickMessage('Reopened in external editor', 1500);
+			return;
+		}
+
+		var fs = require('fs');
+		var path = require('path');
+		var os = require('os');
+
+		// Export layer to temp PNG
+		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
+		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
+		var safeName = (layer.name || 'layer').replace(/[^a-zA-Z0-9_-]/g, '_');
+		var tmpFile = path.join(tmpDir, safeName + '_' + uuid.slice(0, 8) + '.png');
+
+		// Write canvas to PNG file
+		var dataURL = layer.canvas.toDataURL('image/png');
+		var base64 = dataURL.replace(/^data:image\/png;base64,/, '');
+		fs.writeFileSync(tmpFile, Buffer.from(base64, 'base64'));
+
+		// Watch for file changes
+		var lastMtime = Date.now();
+		var pollInterval = setInterval(function () {
+			try {
+				var stat = fs.statSync(tmpFile);
+				var mtime = stat.mtimeMs;
+				if (mtime > lastMtime) {
+					lastMtime = mtime;
+					reimportExternalEdit(uuid, tmpFile);
+				}
+			} catch (e) {
+				// File deleted or inaccessible — stop watching
+				stopExternalEdit(uuid);
+			}
+		}, 500);
+
+		externalEdits[uuid] = { path: tmpFile, pollInterval: pollInterval, texUUID: tex.uuid };
+
+		// Open in default image editor (Photoshop if set as default for .png)
+		require('electron').shell.openPath(tmpFile);
+		Blockbench.showQuickMessage('Opened "' + layer.name + '" in external editor. Save there to sync back.', 3000);
+		updatePanel();
+	}
+
+	function reimportExternalEdit(uuid, filePath) {
+		var fs = require('fs');
+		var edit = externalEdits[uuid];
+		if (!edit) return;
+
+		var tex = Texture.all.find(function (t) { return t.uuid === edit.texUUID; });
+		if (!tex || !tex.layers_enabled) return;
+		var layer = tex.layers.find(function (l) { return l.uuid === uuid; });
+		if (!layer) return;
+
+		// Read the modified file and draw onto layer
+		var buf = fs.readFileSync(filePath);
+		var blob = new Blob([buf], { type: 'image/png' });
+		var url = URL.createObjectURL(blob);
+		var img = new Image();
+		img.onload = function () {
+			layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+			layer.ctx.drawImage(img, 0, 0);
+			URL.revokeObjectURL(url);
+			tex.updateLayerChanges(true);
+			updatePanel();
+			Blockbench.showQuickMessage('Layer "' + layer.name + '" synced from external editor', 1500);
+		};
+		img.onerror = function () {
+			URL.revokeObjectURL(url);
+		};
+		img.src = url;
+	}
+
+	function stopExternalEdit(uuid) {
+		var edit = externalEdits[uuid];
+		if (!edit) return;
+		if (edit.pollInterval) clearInterval(edit.pollInterval);
+		// Clean up temp file
+		try { require('fs').unlinkSync(edit.path); } catch (e) {}
+		delete externalEdits[uuid];
+		updatePanel();
+	}
+
+	function stopAllExternalEdits() {
+		for (var uuid in externalEdits) {
+			stopExternalEdit(uuid);
+		}
+	}
+
+	function isExternallyEdited(uuid) {
+		return !!externalEdits[uuid];
+	}
+
 	// ---- Mirror Operations ----
 
 	function mirrorLayerH(layer) {
@@ -1032,7 +1137,7 @@
 										@click="selectLayer(layer)"\
 										@contextmenu.prevent.stop="showLayerContextMenu($event, layer)">\
 										<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
-										<img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" />\
+										<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" /><i v-if="isExtEdited(layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
 										<button class="lmp-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
 											<i class="material-icons">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
 										</button>\
@@ -1063,7 +1168,7 @@
 								@click="selectLayer(item.layer)"\
 								@contextmenu.prevent.stop="showLayerContextMenu($event, item.layer)">\
 								<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
-								<img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" />\
+								<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" /><i v-if="isExtEdited(item.layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
 								<button class="lmp-btn" @click.stop="toggleVis(item.layer)" :title="item.layer.visible ? \'Hide\' : \'Show\'">\
 									<i class="material-icons">{{ item.layer.visible ? "visibility" : "visibility_off" }}</i>\
 								</button>\
@@ -1221,6 +1326,9 @@
 					this.tick; // refresh on tick
 					return getLayerPreviewDataURL(layer);
 				},
+				isExtEdited: function (layer) {
+					return isExternallyEdited(layer.uuid);
+				},
 				showLayerContextMenu: function (event, layer) {
 					var self = this;
 					var items = [
@@ -1240,6 +1348,24 @@
 								self.tick++;
 							}
 						},
+						'_',
+						{
+							name: isExternallyEdited(layer.uuid) ? 'Reopen in External Editor' : 'Edit in External Editor',
+							icon: 'open_in_new',
+							click: function () {
+								editLayerExternal(layer);
+								self.tick++;
+							}
+						},
+						isExternallyEdited(layer.uuid) ? {
+							name: 'Stop External Edit',
+							icon: 'link_off',
+							click: function () {
+								stopExternalEdit(layer.uuid);
+								Blockbench.showQuickMessage('External edit stopped', 1500);
+								self.tick++;
+							}
+						} : null,
 						'_',
 						{
 							name: 'Rename',
@@ -1267,7 +1393,7 @@
 							}
 						}
 					];
-					var menu = new Menu(items);
+					var menu = new Menu(items.filter(function (x) { return x !== null; }));
 					menu.open(event);
 				},
 				mergeVisible: mergeVisibleLayers,
@@ -1703,7 +1829,9 @@
 				.lmp-layer-item:hover { background: var(--color-button); border-color: var(--color-border); }\
 				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-color: var(--color-accent); }\
 				.lmp-layer-item.locked { opacity: 0.55; }\
-				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; flex-shrink: 0; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); }\
+				.lmp-preview-wrap { position: relative; flex-shrink: 0; width: 28px; height: 28px; }\
+				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); display: block; }\
+				.lmp-ext-badge { position: absolute; bottom: -2px; right: -2px; font-size: 12px; color: #4fc3f7; background: var(--color-back); border-radius: 50%; line-height: 1; }\
 				.lmp-layer-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }\
 				\
 				/* Layer buttons */\
@@ -1878,6 +2006,7 @@
 
 			// Also listen for project close/switch to clear state
 			function onNewProject() {
+				stopAllExternalEdits();
 				clearLmpData();
 				updatePanel();
 			}
@@ -1908,6 +2037,8 @@
 		},
 
 		onunload: function () {
+			// Stop all external edits
+			stopAllExternalEdits();
 			// Remove event listeners
 			eventListeners.forEach(function (entry) {
 				Blockbench.removeListener(entry.event, entry.fn);
