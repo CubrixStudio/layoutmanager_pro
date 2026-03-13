@@ -403,6 +403,30 @@
 		updatePanel();
 	}
 
+	function isGroupLocked(groupName) {
+		var uuids = _groups()[groupName] || [];
+		if (uuids.length === 0) return false;
+		for (var i = 0; i < uuids.length; i++) {
+			if (!_locks().has(uuids[i])) return false;
+		}
+		return true;
+	}
+
+	function toggleGroupLock(groupName) {
+		var uuids = _groups()[groupName] || [];
+		if (uuids.length === 0) return;
+		var locked = isGroupLocked(groupName);
+		uuids.forEach(function (uuid) {
+			if (locked) {
+				_locks().delete(uuid);
+			} else {
+				_locks().add(uuid);
+			}
+		});
+		Blockbench.showQuickMessage((locked ? 'Unlocked' : 'Locked') + ' group: ' + groupName, 1000);
+		updatePanel();
+	}
+
 	// ---- Lock Management ----
 
 	function toggleLayerLock(layer) {
@@ -1645,6 +1669,9 @@
 									<button @click.stop="toggleGroupVis(item.name)" :title="item.allVisible ? \'Hide group\' : \'Show group\'" class="lmp-grp-btn">\
 										<i class="material-icons">{{ item.allVisible ? "visibility" : "visibility_off" }}</i>\
 									</button>\
+									<button @click.stop="toggleGroupLock(item.name)" :title="item.allLocked ? \'Unlock group\' : \'Lock group\'" class="lmp-grp-btn">\
+										<i class="material-icons">{{ item.allLocked ? "lock" : "lock_open" }}</i>\
+									</button>\
 									<button @click.stop="deleteGroup(item.name)" title="Delete group" class="lmp-grp-btn">\
 										<i class="material-icons">close</i>\
 									</button>\
@@ -1816,16 +1843,20 @@
 							if (!_groups()[name]) continue;
 							var groupLayers = [];
 							var allVisible = true;
-							(_groups()[name] || []).forEach(function (uuid) {
+							var allLocked = true;
+							var memberUUIDs = _groups()[name] || [];
+							memberUUIDs.forEach(function (uuid) {
 								var l = layerMap[uuid];
 								if (l) {
 									groupLayers.push(l);
 									seenUUIDs.add(uuid);
 									if (!l.visible) allVisible = false;
+									if (!_locks().has(uuid)) allLocked = false;
 								}
 							});
+							if (memberUUIDs.length === 0) allLocked = false;
 							tree.push({
-								type: 'group', name: name, layers: groupLayers, allVisible: allVisible,
+								type: 'group', name: name, layers: groupLayers, allVisible: allVisible, allLocked: allLocked,
 								canUp: i > 0, canDown: i < to.length - 1,
 							});
 						} else {
@@ -2161,6 +2192,10 @@
 				},
 				toggleGroupVis: function (groupName) {
 					toggleGroupVisibility(groupName);
+					this.tick++;
+				},
+				toggleGroupLock: function (groupName) {
+					toggleGroupLock(groupName);
 					this.tick++;
 				},
 				deleteGroup: function (groupName) {
