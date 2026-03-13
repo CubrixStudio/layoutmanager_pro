@@ -878,6 +878,97 @@
 	// ---- Edit All Layers in Photoshop ----
 
 	var psdEditState = null; // { path, pollInterval, texUUID }
+	var photoshopPath = null; // cached Photoshop executable path
+
+	function findPhotoshopPath() {
+		if (photoshopPath) return photoshopPath;
+		var fs = require('fs');
+		var path = require('path');
+		var candidates = [];
+		if (process.platform === 'win32') {
+			// Scan Program Files for Photoshop versions
+			var dirs = ['C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe'];
+			dirs.forEach(function (dir) {
+				try {
+					fs.readdirSync(dir).forEach(function (sub) {
+						if (/photoshop/i.test(sub)) {
+							var exe = path.join(dir, sub, 'Photoshop.exe');
+							if (fs.existsSync(exe)) candidates.push(exe);
+						}
+					});
+				} catch (e) {}
+			});
+		} else if (process.platform === 'darwin') {
+			try {
+				fs.readdirSync('/Applications').forEach(function (app) {
+					if (/photoshop/i.test(app)) {
+						var p = '/Applications/' + app + '/Contents/MacOS/Adobe Photoshop';
+						// macOS app path varies, just use open -a
+						candidates.push('/Applications/' + app);
+					}
+				});
+			} catch (e) {}
+		}
+		if (candidates.length > 0) {
+			photoshopPath = candidates[candidates.length - 1]; // latest version
+		}
+		return photoshopPath;
+	}
+
+	function openFileInPhotoshop(filePath) {
+		var exec = require('child_process').exec;
+		var psPath = findPhotoshopPath();
+
+		if (psPath) {
+			if (process.platform === 'win32') {
+				exec('"' + psPath + '" "' + filePath + '"');
+			} else if (process.platform === 'darwin') {
+				exec('open -a "' + psPath + '" "' + filePath + '"');
+			} else {
+				exec('xdg-open "' + filePath + '"');
+			}
+			return true;
+		}
+
+		// Fallback: try shell.openPath, then offer to browse
+		require('electron').shell.openPath(filePath).then(function (err) {
+			if (err) {
+				promptPhotoshopPath(filePath);
+			}
+		});
+		return true;
+	}
+
+	function promptPhotoshopPath(fileToOpen) {
+		var electron = require('electron');
+		var dialog = electron.dialog || (electron.remote && electron.remote.dialog);
+		if (!dialog) {
+			Blockbench.showQuickMessage('Cannot find Photoshop. Set .psd file association manually.', 3000);
+			return;
+		}
+		Blockbench.showMessageBox({
+			title: 'Photoshop Not Found',
+			message: 'Could not find Adobe Photoshop automatically. Would you like to locate it?',
+			buttons: ['Browse...', 'Cancel']
+		}, function (result) {
+			if (result === 0) {
+				var filters = process.platform === 'win32'
+					? [{ name: 'Executable', extensions: ['exe'] }]
+					: [{ name: 'Application', extensions: ['*'] }];
+				Blockbench.import({
+					extensions: process.platform === 'win32' ? ['exe'] : ['app', '*'],
+					type: 'Photoshop Executable',
+					readtype: 'none',
+					resource_id: 'photoshop_path'
+				}, function (files) {
+					if (files && files.length > 0) {
+						photoshopPath = files[0].path;
+						openFileInPhotoshop(fileToOpen);
+					}
+				});
+			}
+		});
+	}
 
 	function editAllLayersExternal() {
 		var tex = getSelectedTexture();
@@ -888,8 +979,8 @@
 
 		// If already editing, reopen
 		if (psdEditState && psdEditState.texUUID === tex.uuid) {
-			require('electron').shell.openPath(psdEditState.path);
-			Blockbench.showQuickMessage('Reopened PSD in external editor', 1500);
+			openFileInPhotoshop(psdEditState.path);
+			Blockbench.showQuickMessage('Reopened PSD in Photoshop', 1500);
 			return;
 		}
 
@@ -920,7 +1011,7 @@
 
 		psdEditState = { path: tmpFile, pollInterval: poll, texUUID: tex.uuid };
 
-		require('electron').shell.openPath(tmpFile);
+		openFileInPhotoshop(tmpFile);
 		Blockbench.showQuickMessage('All layers exported to PSD. Save in Photoshop to sync back.', 3000);
 		updatePanel();
 	}
