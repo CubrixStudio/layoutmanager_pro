@@ -896,17 +896,11 @@
 
 	function openFileInPhotoshop(filePath, callback) {
 		var psPath = getPhotoshopPath();
-		var execFile = require('child_process').execFile;
-
-		if (process.platform === 'win32') {
-			execFile(psPath, [filePath], { windowsHide: false }, function (err) {
-				if (err) console.warn('LMP: Photoshop exec error (non-blocking):', err.message);
-			});
-		} else if (process.platform === 'darwin') {
-			require('child_process').exec('open -a "' + psPath + '" "' + filePath + '"');
-		} else {
-			require('child_process').exec('xdg-open "' + filePath + '"');
-		}
+		var cp = require('child_process');
+		// On Windows, just execFile Photoshop directly
+		cp.execFile(psPath, [filePath], function (err) {
+			if (err) console.warn('LMP: Photoshop exec:', err.message);
+		});
 		if (callback) callback(true);
 	}
 
