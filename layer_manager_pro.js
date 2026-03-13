@@ -1579,10 +1579,54 @@
 
 	// ---- Panel UI ----
 
+	function _lmpStorageKey() {
+		try {
+			if (Project && (Project.save_path || Project.name)) {
+				return 'lmp_state_' + (Project.save_path || Project.name);
+			}
+		} catch (e) {}
+		return null;
+	}
+
+	function saveLmpToLocalStorage() {
+		var key = _lmpStorageKey();
+		if (!key) return;
+		try {
+			var data = serializeLmpData();
+			// Only save if there's something meaningful
+			if (data.perTexture && Object.keys(data.perTexture).length > 0) {
+				localStorage.setItem(key, JSON.stringify(data));
+			}
+		} catch (e) {
+			console.warn('LMP: localStorage save failed:', e.message);
+		}
+	}
+
+	function restoreLmpFromLocalStorage() {
+		var key = _lmpStorageKey();
+		if (!key) return false;
+		try {
+			var raw = localStorage.getItem(key);
+			if (raw) {
+				var data = JSON.parse(raw);
+				deserializeLmpData(data);
+				setTimeout(reapplyAllFilterStacks, 200);
+				return true;
+			}
+		} catch (e) {
+			console.warn('LMP: localStorage restore failed:', e.message);
+		}
+		return false;
+	}
+
+	var _saveDebounce = null;
 	function updatePanel() {
 		if (layerPanel && layerPanel.inside_vue) {
 			layerPanel.inside_vue.tick++;
 		}
+		// Debounced auto-save to localStorage
+		if (_saveDebounce) clearTimeout(_saveDebounce);
+		_saveDebounce = setTimeout(saveLmpToLocalStorage, 300);
 	}
 
 	function getLayerGroupName(uuid) {
@@ -2774,27 +2818,10 @@
 				updatePanel();
 			}, 500);
 
-			// Restore LMP data from already-open project (handles plugin reload)
-			try {
-				if (Project && Project.save_path) {
-					// Project is already open, try to read LMP data from model
-					var codec = Codecs.project || Codecs.bedrock;
-					if (codec && codec.format && Format === codec.format) {
-						// The model data is in Project; try reading from saved bbmodel
-						var fs = require('fs');
-						if (Project.save_path && fs.existsSync(Project.save_path)) {
-							var raw = fs.readFileSync(Project.save_path, 'utf8');
-							var model = JSON.parse(raw);
-							if (model.layer_manager_pro) {
-								deserializeLmpData(model.layer_manager_pro);
-								setTimeout(reapplyAllFilterStacks, 200);
-								updatePanel();
-							}
-						}
-					}
-				}
-			} catch (e) {
-				console.warn('LMP: Failed to restore data on plugin reload:', e.message);
+			// Restore LMP data from localStorage (handles plugin reload)
+			if (restoreLmpFromLocalStorage()) {
+				console.log('LMP: Restored state from localStorage');
+				updatePanel();
 			}
 		},
 
