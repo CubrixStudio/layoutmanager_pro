@@ -717,7 +717,7 @@
 
 	// ---- PSD Encoder / Decoder ----
 
-	function buildPSD(layers, docW, docH) {
+	function buildPSD(layers, docW, docH, groupInfo) {
 		var parts = [];
 		function w8(v) { var b = Buffer.alloc(1); b.writeUInt8(v); parts.push(b); }
 		function wi16(v) { var b = Buffer.alloc(2); b.writeInt16BE(v); parts.push(b); }
@@ -730,24 +730,87 @@
 		function ph32() { var idx = parts.length; wu32(0); return idx; }
 		function fill32(idx, v) { parts[idx].writeUInt32BE(v); }
 
-		// Prepare layer channel data
-		var lds = layers.map(function (layer, i) {
-			var w = layer.canvas.width, h = layer.canvas.height;
-			var px = layer.ctx.getImageData(0, 0, w, h).data;
-			var n = w * h;
-			var R = Buffer.alloc(n), G = Buffer.alloc(n), B = Buffer.alloc(n), A = Buffer.alloc(n);
-			for (var p = 0; p < n; p++) {
-				R[p] = px[p * 4]; G[p] = px[p * 4 + 1]; B[p] = px[p * 4 + 2]; A[p] = px[p * 4 + 3];
+		// Filter out layers without valid canvas
+		layers = layers.filter(function (l) { return l.canvas && l.canvas.width > 0 && l.canvas.height > 0; });
+		if (layers.length === 0) throw new Error('No valid layers to export');
+
+		// Build PSD entry list with group markers if groupInfo provided
+		// groupInfo: { treeOrder: [...], groups: { name: [uuid,...] } }
+		// PSD layers are stored bottom-to-top; groups use lsct section dividers
+		var entries = []; // { type: 'layer'|'group_start'|'group_end', layer?, name? }
+		if (groupInfo && groupInfo.treeOrder) {
+			var layerMap = {};
+			layers.forEach(function (l) { layerMap[l.uuid] = l; });
+			// Walk treeOrder top-to-bottom, build visual order
+			var visual = [];
+			for (var i = 0; i < groupInfo.treeOrder.length; i++) {
+				var entry = groupInfo.treeOrder[i];
+				if (entry.indexOf('group:') === 0) {
+					var gname = entry.slice(6);
+					var members = groupInfo.groups[gname] || [];
+					visual.push({ type: 'group_start', name: gname });
+					for (var j = 0; j < members.length; j++) {
+						var ml = layerMap[members[j]];
+						if (ml) { visual.push({ type: 'layer', layer: ml }); delete layerMap[members[j]]; }
+					}
+					visual.push({ type: 'group_end', name: gname });
+				} else {
+					var ul = layerMap[entry];
+					if (ul) { visual.push({ type: 'layer', layer: ul }); delete layerMap[entry]; }
+				}
 			}
-			var ox = layer.offset ? layer.offset[0] : 0;
-			var oy = layer.offset ? layer.offset[1] : 0;
-			var nb = Buffer.from(layer.name || 'Layer ' + i, 'utf8');
-			if (nb.length > 255) nb = nb.slice(0, 255);
-			var npl = Math.ceil((1 + nb.length) / 4) * 4;
-			return { w: w, h: h, ox: ox, oy: oy, R: R, G: G, B: B, A: A, nb: nb, npl: npl,
-				op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
-				vis: layer.visible !== false };
-		});
+			// Add any remaining layers not in treeOrder
+			for (var uuid in layerMap) {
+				visual.push({ type: 'layer', layer: layerMap[uuid] });
+			}
+			// Reverse to get bottom-to-top (PSD order)
+			entries = visual.reverse();
+		} else {
+			// No groups, flat list (already bottom-to-top from tex.layers)
+			for (var i = 0; i < layers.length; i++) {
+				entries.push({ type: 'layer', layer: layers[i] });
+			}
+		}
+
+		// Prepare PSD record data for each entry
+		var lds = [];
+		for (var ei = 0; ei < entries.length; ei++) {
+			var e = entries[ei];
+			if (e.type === 'layer') {
+				var layer = e.layer;
+				var w = layer.canvas.width, h = layer.canvas.height;
+				var px = layer.ctx.getImageData(0, 0, w, h).data;
+				var n = w * h;
+				var R = Buffer.alloc(n), G = Buffer.alloc(n), B = Buffer.alloc(n), A = Buffer.alloc(n);
+				for (var p = 0; p < n; p++) {
+					R[p] = px[p * 4]; G[p] = px[p * 4 + 1]; B[p] = px[p * 4 + 2]; A[p] = px[p * 4 + 3];
+				}
+				var ox = layer.offset ? layer.offset[0] : 0;
+				var oy = layer.offset ? layer.offset[1] : 0;
+				var nb = Buffer.from(layer.name || 'Layer ' + ei, 'utf8');
+				if (nb.length > 255) nb = nb.slice(0, 255);
+				var npl = Math.ceil((1 + nb.length) / 4) * 4;
+				lds.push({ kind: 'layer', w: w, h: h, ox: ox, oy: oy, R: R, G: G, B: B, A: A, nb: nb, npl: npl,
+					op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
+					vis: layer.visible !== false, lsct: -1 });
+			} else if (e.type === 'group_end') {
+				// In PSD bottom-to-top: group_end = bounding section divider (lsct type 3)
+				// This comes first (bottom) for the group
+				var gnb = Buffer.from(e.name, 'utf8');
+				if (gnb.length > 255) gnb = gnb.slice(0, 255);
+				var gnpl = Math.ceil((1 + gnb.length) / 4) * 4;
+				lds.push({ kind: 'group_open', w: 0, h: 0, ox: 0, oy: 0, nb: gnb, npl: gnpl,
+					op: 255, vis: true, lsct: 1 }); // lsct=1: open folder
+			} else if (e.type === 'group_start') {
+				// In PSD bottom-to-top: group_start = bounding divider (appears at top = last in bottom-to-top)
+				var dnb = Buffer.from('</Layer group>', 'utf8');
+				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
+				lds.push({ kind: 'group_end', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
+					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
+			}
+		}
+
+		var totalRecords = lds.length;
 
 		// Header
 		wstr('8BPS'); wu16(1); wbuf(Buffer.alloc(6)); wu16(4);
@@ -758,26 +821,55 @@
 		// Layer and Mask Info
 		var lmiIdx = ph32(); var lmiStart = pos();
 		var liIdx = ph32(); var liStart = pos();
-		wi16(-layers.length);
+		wi16(-totalRecords);
 
 		// Layer records
 		for (var i = 0; i < lds.length; i++) {
-			var d = lds[i]; var cdl = 2 + d.w * d.h;
-			wi32(d.oy); wi32(d.ox); wi32(d.oy + d.h); wi32(d.ox + d.w);
-			wu16(4);
-			wi16(-1); wu32(cdl); wi16(0); wu32(cdl); wi16(1); wu32(cdl); wi16(2); wu32(cdl);
-			wstr('8BIM'); wstr('norm');
-			w8(d.op); w8(0); w8(d.vis ? 0 : 2); w8(0);
-			wu32(4 + 4 + d.npl); wu32(0); wu32(0);
-			w8(d.nb.length); wbuf(d.nb);
-			var pad = d.npl - 1 - d.nb.length;
-			if (pad > 0) wbuf(Buffer.alloc(pad));
+			var d = lds[i];
+			if (d.kind === 'layer') {
+				var cdl = 2 + d.w * d.h;
+				wi32(d.oy); wi32(d.ox); wi32(d.oy + d.h); wi32(d.ox + d.w);
+				wu16(4);
+				wi16(-1); wu32(cdl); wi16(0); wu32(cdl); wi16(1); wu32(cdl); wi16(2); wu32(cdl);
+				wstr('8BIM'); wstr('norm');
+				w8(d.op); w8(0); w8(d.vis ? 0 : 2); w8(0);
+				wu32(4 + 4 + d.npl); wu32(0); wu32(0);
+				w8(d.nb.length); wbuf(d.nb);
+				var pad = d.npl - 1 - d.nb.length;
+				if (pad > 0) wbuf(Buffer.alloc(pad));
+			} else {
+				// Group marker (open folder or bounding divider)
+				// Empty 1x1 transparent layer with lsct additional info
+				wi32(0); wi32(0); wi32(0); wi32(0); // zero rect
+				wu16(4);
+				wi16(-1); wu32(2); wi16(0); wu32(2); wi16(1); wu32(2); wi16(2); wu32(2); // minimal channel data (compression only)
+				wstr('8BIM'); wstr(d.lsct === 3 ? 'norm' : 'pass'); // pass-through for folder
+				w8(d.op); w8(0); w8(0); w8(0);
+				// Extra data: mask(4) + blending(4) + name(npl) + lsct(8+12)
+				var lsctLen = 8 + 12; // '8BIM' + 'lsct' + length(4) + type(4) + '8BIM' + 'pass'/'norm'
+				wu32(4 + 4 + d.npl + lsctLen);
+				wu32(0); wu32(0); // mask + blending ranges
+				w8(d.nb.length); wbuf(d.nb);
+				var pad = d.npl - 1 - d.nb.length;
+				if (pad > 0) wbuf(Buffer.alloc(pad));
+				// lsct additional layer information
+				wstr('8BIM'); wstr('lsct');
+				wu32(12); // data length: type(4) + sig(4) + blend(4)
+				wu32(d.lsct); // section type
+				wstr('8BIM');
+				wstr(d.lsct === 3 ? 'norm' : 'pass');
+			}
 		}
 
 		// Channel data
 		for (var i = 0; i < lds.length; i++) {
 			var d = lds[i];
-			wu16(0); wbuf(d.A); wu16(0); wbuf(d.R); wu16(0); wbuf(d.G); wu16(0); wbuf(d.B);
+			if (d.kind === 'layer') {
+				wu16(0); wbuf(d.A); wu16(0); wbuf(d.R); wu16(0); wbuf(d.G); wu16(0); wbuf(d.B);
+			} else {
+				// Group markers: minimal empty channel data (compression type 0, no pixels)
+				wu16(0); wu16(0); wu16(0); wu16(0);
+			}
 		}
 
 		var liLen = pos() - liStart;
@@ -830,19 +922,40 @@
 			skip(ru32()); // mask data
 			skip(ru32()); // blending ranges
 			var nl = r8(); var name = buf.toString('utf8', o.v, o.v + nl); o.v += nl;
+			// Check for lsct (layer section divider) to detect group markers
+			var lsctType = -1;
+			var scan = o.v;
+			while (scan + 12 <= extraEnd) {
+				var sig = buf.toString('ascii', scan, scan + 4);
+				if (sig !== '8BIM' && sig !== '8B64') { scan++; continue; }
+				var key = buf.toString('ascii', scan + 4, scan + 8);
+				var dlen = buf.readUInt32BE(scan + 8);
+				if (key === 'lsct' || key === 'lsdk') {
+					lsctType = buf.readUInt32BE(scan + 12);
+					break;
+				}
+				scan += 12 + dlen;
+				if (scan % 2 !== 0) scan++;
+			}
 			o.v = extraEnd;
 			recs.push({ top: top, left: left, w: right - left, h: bottom - top,
 				chInfo: chInfo, opacity: opacity, flags: flags, name: name,
-				visible: !(flags & 2) });
+				visible: !(flags & 2), lsctType: lsctType });
 		}
 
 		// Channel image data
 		var layers = [];
 		for (var i = 0; i < cnt; i++) {
-			var rec = recs[i]; var n = rec.w * rec.h; var chd = {};
+			var rec = recs[i];
+			var isGroupMarker = rec.lsctType >= 0; // 0,1,2,3 = section dividers
+			var n = rec.w * rec.h;
+			var chd = {};
 			for (var c = 0; c < rec.chInfo.length; c++) {
 				var cid = rec.chInfo[c].id; var comp = ru16();
-				if (comp === 0) {
+				if (isGroupMarker || n === 0) {
+					// Skip channel data for group markers / empty layers
+					o.v += rec.chInfo[c].len - 2;
+				} else if (comp === 0) {
 					chd[cid] = buf.slice(o.v, o.v + n); o.v += n;
 				} else if (comp === 1) {
 					// RLE PackBits
@@ -863,6 +976,8 @@
 					chd[cid] = Buffer.alloc(n);
 				}
 			}
+			// Skip group markers - only import actual image layers
+			if (isGroupMarker || n === 0) continue;
 			var R = chd[0] || Buffer.alloc(n); var G = chd[1] || Buffer.alloc(n);
 			var B = chd[2] || Buffer.alloc(n); var A = chd[-1] || Buffer.alloc(n, 255);
 			var rgba = new Uint8ClampedArray(n * 4);
@@ -878,96 +993,63 @@
 	// ---- Edit All Layers in Photoshop ----
 
 	var psdEditState = null; // { path, pollInterval, texUUID }
-	var photoshopPath = null; // cached Photoshop executable path
+	var DEFAULT_PS_PATH = 'C:\\Program Files\\Adobe\\Adobe Photoshop 2026\\Photoshop.exe';
 
-	function findPhotoshopPath() {
-		if (photoshopPath) return photoshopPath;
-		var fs = require('fs');
-		var path = require('path');
-		var candidates = [];
-		if (process.platform === 'win32') {
-			// Scan Program Files for Photoshop versions
-			var dirs = ['C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe'];
-			dirs.forEach(function (dir) {
-				try {
-					fs.readdirSync(dir).forEach(function (sub) {
-						if (/photoshop/i.test(sub)) {
-							var exe = path.join(dir, sub, 'Photoshop.exe');
-							if (fs.existsSync(exe)) candidates.push(exe);
+	function getPhotoshopPath() {
+		var saved = localStorage.getItem('lmp_photoshop_path');
+		if (saved) return saved;
+		return DEFAULT_PS_PATH;
+	}
+
+	function setPhotoshopPath(p) {
+		localStorage.setItem('lmp_photoshop_path', p);
+	}
+
+	function openFileInPhotoshop(filePath, callback) {
+		var psPath = getPhotoshopPath();
+		var cp = require('child_process');
+		// On Windows, just execFile Photoshop directly
+		cp.execFile(psPath, [filePath], function (err) {
+			if (err) console.warn('LMP: Photoshop exec:', err.message);
+		});
+		if (callback) callback(true);
+	}
+
+	function configurePhotoshopPath() {
+		var current = getPhotoshopPath();
+		var dialog = new Dialog({
+			id: 'lmp_ps_config',
+			title: 'Photoshop Configuration',
+			form: {
+				ps_path: { label: 'Photoshop Path', type: 'text', value: current },
+				info: { type: 'info', text: 'Default: ' + DEFAULT_PS_PATH }
+			},
+			buttons: ['dialog.confirm', 'Browse...', 'dialog.cancel'],
+			onButton: function (idx) {
+				if (idx === 1) {
+					// Browse button
+					Blockbench.import({
+						extensions: ['exe'],
+						type: 'Locate Photoshop.exe',
+						readtype: 'none',
+						resource_id: 'lmp_photoshop_path',
+						startpath: 'C:\\Program Files\\Adobe'
+					}, function (files) {
+						if (files && files.length > 0) {
+							dialog.setFormValues({ ps_path: files[0].path });
 						}
 					});
-				} catch (e) {}
-			});
-		} else if (process.platform === 'darwin') {
-			try {
-				fs.readdirSync('/Applications').forEach(function (app) {
-					if (/photoshop/i.test(app)) {
-						var p = '/Applications/' + app + '/Contents/MacOS/Adobe Photoshop';
-						// macOS app path varies, just use open -a
-						candidates.push('/Applications/' + app);
-					}
-				});
-			} catch (e) {}
-		}
-		if (candidates.length > 0) {
-			photoshopPath = candidates[candidates.length - 1]; // latest version
-		}
-		return photoshopPath;
-	}
-
-	function openFileInPhotoshop(filePath) {
-		var exec = require('child_process').exec;
-		var psPath = findPhotoshopPath();
-
-		if (psPath) {
-			if (process.platform === 'win32') {
-				exec('"' + psPath + '" "' + filePath + '"');
-			} else if (process.platform === 'darwin') {
-				exec('open -a "' + psPath + '" "' + filePath + '"');
-			} else {
-				exec('xdg-open "' + filePath + '"');
-			}
-			return true;
-		}
-
-		// Fallback: try shell.openPath, then offer to browse
-		require('electron').shell.openPath(filePath).then(function (err) {
-			if (err) {
-				promptPhotoshopPath(filePath);
+					return false; // keep dialog open
+				}
+			},
+			onConfirm: function (formData) {
+				if (formData.ps_path && formData.ps_path.trim()) {
+					setPhotoshopPath(formData.ps_path.trim());
+					Blockbench.showQuickMessage('Photoshop path saved', 1500);
+				}
 			}
 		});
-		return true;
-	}
-
-	function promptPhotoshopPath(fileToOpen) {
-		var electron = require('electron');
-		var dialog = electron.dialog || (electron.remote && electron.remote.dialog);
-		if (!dialog) {
-			Blockbench.showQuickMessage('Cannot find Photoshop. Set .psd file association manually.', 3000);
-			return;
-		}
-		Blockbench.showMessageBox({
-			title: 'Photoshop Not Found',
-			message: 'Could not find Adobe Photoshop automatically. Would you like to locate it?',
-			buttons: ['Browse...', 'Cancel']
-		}, function (result) {
-			if (result === 0) {
-				var filters = process.platform === 'win32'
-					? [{ name: 'Executable', extensions: ['exe'] }]
-					: [{ name: 'Application', extensions: ['*'] }];
-				Blockbench.import({
-					extensions: process.platform === 'win32' ? ['exe'] : ['app', '*'],
-					type: 'Photoshop Executable',
-					readtype: 'none',
-					resource_id: 'photoshop_path'
-				}, function (files) {
-					if (files && files.length > 0) {
-						photoshopPath = files[0].path;
-						openFileInPhotoshop(fileToOpen);
-					}
-				});
-			}
-		});
+		dialog.show();
 	}
 
 	function editAllLayersExternal() {
@@ -993,11 +1075,33 @@
 		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
 		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
 
-		var psdBuf = buildPSD(tex.layers, tex.width, tex.height);
+		var td = getTexData();
+		var groupInfo = {
+			treeOrder: td.treeOrder.slice(),
+			groups: JSON.parse(JSON.stringify(td.groups))
+		};
+
+		var psdBuf;
+		try {
+			psdBuf = buildPSD(tex.layers, tex.width, tex.height, groupInfo);
+		} catch (e) {
+			console.error('LMP: buildPSD failed:', e);
+			Blockbench.showQuickMessage('Error building PSD: ' + e.message, 3000);
+			return;
+		}
 		var safeName = (tex.name || 'texture').replace(/[^a-zA-Z0-9_-]/g, '_');
 		var tmpFile = path.join(tmpDir, safeName + '_' + tex.uuid.slice(0, 8) + '.psd');
-		fs.writeFileSync(tmpFile, psdBuf);
+		try {
+			fs.writeFileSync(tmpFile, psdBuf);
+		} catch (e) {
+			console.error('LMP: Failed to write PSD:', e);
+			Blockbench.showQuickMessage('Error writing PSD: ' + e.message, 3000);
+			return;
+		}
 
+		console.log('LMP: PSD written to', tmpFile, '(' + psdBuf.length + ' bytes)');
+
+		// Start polling immediately, then open Photoshop
 		var lastMtime = Date.now();
 		var poll = setInterval(function () {
 			try {
@@ -1010,10 +1114,11 @@
 		}, 800);
 
 		psdEditState = { path: tmpFile, pollInterval: poll, texUUID: tex.uuid };
+		updatePanel();
 
+		// Launch Photoshop
 		openFileInPhotoshop(tmpFile);
 		Blockbench.showQuickMessage('All layers exported to PSD. Save in Photoshop to sync back.', 3000);
-		updatePanel();
 	}
 
 	function reimportPsdEdit(filePath) {
@@ -1426,6 +1531,7 @@
 						<button @click="createGroup" title="Create Group"><i class="material-icons">create_new_folder</i></button>\
 						<button @click="editAllInPS" :title="psdLinked ? \'Reopen PSD in Photoshop\' : \'Edit All Layers in Photoshop\'" :class="{ \'lmp-btn-active\': psdLinked }"><i class="material-icons">photo_library</i></button>\
 						<button v-if="psdLinked" @click="stopPS" title="Stop Photoshop Link" class="lmp-btn-active"><i class="material-icons">link_off</i></button>\
+						<button @click="configPS" title="Configure Photoshop Path"><i class="material-icons">settings</i></button>\
 					</div>\
 					\
 					<div v-if="hasTexture && hasLayers" class="lmp-controls">\
@@ -1766,8 +1872,16 @@
 					menu.open(event);
 				},
 				editAllInPS: function () {
-					editAllLayersExternal();
+					try {
+						editAllLayersExternal();
+					} catch (e) {
+						console.error('LMP: editAllLayersExternal error:', e);
+						Blockbench.showQuickMessage('Error: ' + e.message, 3000);
+					}
 					this.tick++;
+				},
+				configPS: function () {
+					configurePhotoshopPath();
 				},
 				stopPS: function () {
 					stopPsdEdit();
