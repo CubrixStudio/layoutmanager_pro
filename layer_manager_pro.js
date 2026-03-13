@@ -2276,7 +2276,13 @@
 				dropOnLayer: function (e, targetUUID) {
 					if (dragInfo.type === 'layer') {
 						var pos = getDragPos(e, e.currentTarget);
-						this._doLayerDrop(dragInfo.layerUUID, dragInfo.sourceGroup, targetUUID, null, pos);
+						var uuids = this._getDragUUIDs(dragInfo.layerUUID);
+						var self = this;
+						uuids.forEach(function (uuid) {
+							if (uuid === targetUUID) return;
+							var sg = getLayerGroupName(uuid);
+							self._doLayerDrop(uuid, sg, targetUUID, null, pos);
+						});
 					} else if (dragInfo.type === 'group') {
 						// Reorder group relative to ungrouped layer in treeOrder
 						var pos = getDragPos(e, e.currentTarget);
@@ -2297,36 +2303,41 @@
 				dropOnGroupedLayer: function (e, groupName, targetUUID) {
 					if (dragInfo.type === 'layer') {
 						var pos = getDragPos(e, e.currentTarget);
-						this._doLayerDrop(dragInfo.layerUUID, dragInfo.sourceGroup, targetUUID, groupName, pos);
+						var uuids = this._getDragUUIDs(dragInfo.layerUUID);
+						var self = this;
+						uuids.forEach(function (uuid) {
+							if (uuid === targetUUID) return;
+							var sg = getLayerGroupName(uuid);
+							self._doLayerDrop(uuid, sg, targetUUID, groupName, pos);
+						});
 					}
 					this.dragEnd();
 				},
 				dropOnGroup: function (e, groupName) {
 					if (dragInfo.type === 'layer') {
 						var pos = getDragPos3(e, e.currentTarget);
+						var uuids = this._getDragUUIDs(dragInfo.layerUUID);
+						var self = this;
 						if (pos === 'inside') {
-							this._doLayerDropIntoGroup(dragInfo.layerUUID, dragInfo.sourceGroup, groupName);
+							uuids.forEach(function (uuid) {
+								var sg = getLayerGroupName(uuid);
+								self._doLayerDropIntoGroup(uuid, sg, groupName);
+							});
 						} else {
-							// before/after: reorder layer relative to group in treeOrder
-							var dragUUID = dragInfo.layerUUID;
-							if (dragInfo.sourceGroup) {
-								var srcArr = _groups()[dragInfo.sourceGroup];
-								if (srcArr) { var si = srcArr.indexOf(dragUUID); if (si !== -1) srcArr.splice(si, 1); }
-							}
-							// Remove from treeOrder if present
-							var fi = _treeOrder().indexOf(dragUUID);
-							if (fi !== -1) _treeOrder().splice(fi, 1);
-							// Also remove from any group
-							var eg = getLayerGroupName(dragUUID);
-							if (eg) {
-								var ea = _groups()[eg];
-								if (ea) { var ri = ea.indexOf(dragUUID); if (ri !== -1) ea.splice(ri, 1); }
-							}
-							// Insert in treeOrder relative to the group
-							var gi = _treeOrder().indexOf('group:' + groupName);
-							if (gi === -1) gi = _treeOrder().length - 1;
-							if (pos === 'after') gi++;
-							_treeOrder().splice(gi, 0, dragUUID);
+							// before/after: reorder layers relative to group in treeOrder
+							uuids.forEach(function (dragUUID) {
+								var sg = getLayerGroupName(dragUUID);
+								if (sg) {
+									var srcArr = _groups()[sg];
+									if (srcArr) { var si = srcArr.indexOf(dragUUID); if (si !== -1) srcArr.splice(si, 1); }
+								}
+								var fi = _treeOrder().indexOf(dragUUID);
+								if (fi !== -1) _treeOrder().splice(fi, 1);
+								var gi = _treeOrder().indexOf('group:' + groupName);
+								if (gi === -1) gi = _treeOrder().length - 1;
+								if (pos === 'after') gi++;
+								_treeOrder().splice(gi, 0, dragUUID);
+							});
 							syncLayerOrder();
 							updatePanel();
 						}
@@ -2348,7 +2359,12 @@
 				},
 				dropOnGroupBody: function (e, groupName) {
 					if (dragInfo.type === 'layer') {
-						this._doLayerDropIntoGroup(dragInfo.layerUUID, dragInfo.sourceGroup, groupName);
+						var uuids = this._getDragUUIDs(dragInfo.layerUUID);
+						var self = this;
+						uuids.forEach(function (uuid) {
+							var sg = getLayerGroupName(uuid);
+							self._doLayerDropIntoGroup(uuid, sg, groupName);
+						});
 					}
 					this.dragEnd();
 				},
@@ -2373,6 +2389,22 @@
 					this.dragEnd();
 				},
 
+				_getDragUUIDs: function (primaryUUID) {
+					// If the dragged layer is part of multi-selection, return all selected
+					if (multiSelected.size >= 2 && multiSelected.has(primaryUUID)) {
+						// Return in visual order (top-to-bottom from layerTree)
+						var all = this.layerTree.reduce(function (acc, item) {
+							if (item.type === 'group') {
+								item.layers.forEach(function (l) { if (multiSelected.has(l.uuid)) acc.push(l.uuid); });
+							} else {
+								if (multiSelected.has(item.layer.uuid)) acc.push(item.layer.uuid);
+							}
+							return acc;
+						}, []);
+						return all.length > 0 ? all : [primaryUUID];
+					}
+					return [primaryUUID];
+				},
 				_doLayerDrop: function (dragUUID, sourceGroup, targetUUID, targetGroup, position) {
 					if (dragUUID === targetUUID) return;
 					var tex = getSelectedTexture();
