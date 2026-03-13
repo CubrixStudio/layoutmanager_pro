@@ -2706,6 +2706,29 @@
 			updateInterval = setInterval(function () {
 				updatePanel();
 			}, 500);
+
+			// Restore LMP data from already-open project (handles plugin reload)
+			try {
+				if (Project && Project.save_path) {
+					// Project is already open, try to read LMP data from model
+					var codec = Codecs.project || Codecs.bedrock;
+					if (codec && codec.format && Format === codec.format) {
+						// The model data is in Project; try reading from saved bbmodel
+						var fs = require('fs');
+						if (Project.save_path && fs.existsSync(Project.save_path)) {
+							var raw = fs.readFileSync(Project.save_path, 'utf8');
+							var model = JSON.parse(raw);
+							if (model.layer_manager_pro) {
+								deserializeLmpData(model.layer_manager_pro);
+								setTimeout(reapplyAllFilterStacks, 200);
+								updatePanel();
+							}
+						}
+					}
+				}
+			} catch (e) {
+				console.warn('LMP: Failed to restore data on plugin reload:', e.message);
+			}
 		},
 
 		onunload: function () {
