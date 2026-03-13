@@ -49,6 +49,9 @@
 		updatePanel();
 	}
 
+	// ---- Multi-select state ----
+	var multiSelected = new Set(); // Set of layer UUIDs
+
 	// ---- Drag & Drop state ----
 	var dragInfo = {
 		type: null,        // 'layer' | 'group' | 'filter'
@@ -525,6 +528,53 @@
 		merged.addForEditing();
 		_treeOrder().unshift(merged.uuid);
 		Undo.finishEdit('Merge visible layers');
+		tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function mergeSelectedLayers() {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return;
+		if (multiSelected.size < 2) {
+			Blockbench.showQuickMessage('Select at least 2 layers (Ctrl+Click)', 1500);
+			return;
+		}
+
+		Undo.initEdit({ textures: [tex] });
+
+		// Get selected layers in render order (bottom to top = tex.layers order)
+		var selectedLayers = tex.layers.filter(function (l) { return multiSelected.has(l.uuid); });
+		if (selectedLayers.length < 2) {
+			Undo.cancelEdit();
+			return;
+		}
+
+		var merged = new TextureLayer({ name: 'Merged' }, tex);
+		merged.setSize(tex.width, tex.height);
+
+		selectedLayers.forEach(function (l) {
+			merged.ctx.globalAlpha = (l.opacity != null ? l.opacity : 100) / 100;
+			merged.ctx.drawImage(l.canvas, l.offset[0], l.offset[1]);
+		});
+		merged.ctx.globalAlpha = 1;
+
+		// Remove selected layers from treeOrder and groups
+		for (var i = selectedLayers.length - 1; i >= 0; i--) {
+			var uuid = selectedLayers[i].uuid;
+			var gn = getLayerGroupName(uuid);
+			if (gn) {
+				var ga = _groups()[gn];
+				if (ga) { var ri = ga.indexOf(uuid); if (ri !== -1) ga.splice(ri, 1); }
+			}
+			var ti = _treeOrder().indexOf(uuid);
+			if (ti !== -1) _treeOrder().splice(ti, 1);
+			selectedLayers[i].remove(false);
+		}
+
+		merged.addForEditing();
+		_treeOrder().unshift(merged.uuid);
+		multiSelected.clear();
+		Undo.finishEdit('Merge selected layers');
 		tex.updateLayerChanges(true);
 		updatePanel();
 	}
@@ -1527,6 +1577,7 @@
 						<button @click="duplicateLayer" title="Duplicate Layer"><i class="material-icons">content_copy</i></button>\
 						<button @click="importImage" title="Import Image as Layer"><i class="material-icons">image</i></button>\
 						<button @click="mergeVisible" title="Merge Visible"><i class="material-icons">call_merge</i></button>\
+						<button v-if="multiCount >= 2" @click="mergeSelected" :title="\'Merge \' + multiCount + \' Selected\'" class="lmp-btn-active"><i class="material-icons">merge</i></button>\
 						<button @click="flattenAll" title="Flatten All"><i class="material-icons">layers_clear</i></button>\
 						<button @click="createGroup" title="Create Group"><i class="material-icons">create_new_folder</i></button>\
 						<button @click="editAllInPS" :title="psdLinked ? \'Reopen PSD in Photoshop\' : \'Edit All Layers in Photoshop\'" :class="{ \'lmp-btn-active\': psdLinked }"><i class="material-icons">photo_library</i></button>\
@@ -1568,6 +1619,11 @@
 						</div>\
 					</div>\
 					\
+					<div v-if="multiCount >= 1" class="lmp-multi-bar">\
+						<span>{{ multiCount }} selected</span>\
+						<button @click="mergeSelected" v-if="multiCount >= 2" title="Merge Selected"><i class="material-icons">merge</i> Merge</button>\
+						<button @click="clearMultiSelect" title="Clear Selection"><i class="material-icons">close</i></button>\
+					</div>\
 					<div v-if="hasTexture && hasLayers" class="lmp-layer-list">\
 						<template v-for="item in layerTree">\
 							\
@@ -1598,14 +1654,14 @@
 									@drop.prevent.stop="dropOnGroupBody($event, item.name)">\
 									<div v-for="(layer, li) in item.layers" :key="layer.uuid"\
 										class="lmp-layer-item lmp-grouped"\
-										:class="{ selected: isSelected(layer), locked: isLocked(layer), \'lmp-drop-above\': dropId === layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === layer.uuid && dropPos === \'after\' }"\
+										:class="{ selected: isSelected(layer), \'multi-selected\': isMultiSelected(layer), locked: isLocked(layer), \'lmp-drop-above\': dropId === layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === layer.uuid && dropPos === \'after\' }"\
 										draggable="true"\
 										@dragstart.stop="startDragLayer($event, layer.uuid, item.name)"\
 										@dragover.prevent.stop="dragOverGroupedLayer($event, layer.uuid)"\
 										@dragleave="onDragLeave($event)"\
 										@drop.prevent.stop="dropOnGroupedLayer($event, item.name, layer.uuid)"\
 										@dragend="dragEnd"\
-										@click="selectLayer(layer)"\
+										@click="selectLayer(layer, $event)"\
 										@contextmenu.prevent.stop="showLayerContextMenu($event, layer)">\
 										<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
 										<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" /><i v-if="isExtEdited(layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
@@ -1629,14 +1685,14 @@
 							\
 							<div v-else :key="\'l-\' + item.layer.uuid"\
 								class="lmp-layer-item"\
-								:class="{ selected: isSelected(item.layer), locked: isLocked(item.layer), \'lmp-drop-above\': dropId === item.layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === item.layer.uuid && dropPos === \'after\' }"\
+								:class="{ selected: isSelected(item.layer), \'multi-selected\': isMultiSelected(item.layer), locked: isLocked(item.layer), \'lmp-drop-above\': dropId === item.layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === item.layer.uuid && dropPos === \'after\' }"\
 								draggable="true"\
 								@dragstart="startDragLayer($event, item.layer.uuid, null)"\
 								@dragover.prevent="dragOverLayer($event, item.layer.uuid)"\
 								@dragleave="onDragLeave($event)"\
 								@drop.prevent="dropOnLayer($event, item.layer.uuid)"\
 								@dragend="dragEnd"\
-								@click="selectLayer(item.layer)"\
+								@click="selectLayer(item.layer, $event)"\
 								@contextmenu.prevent.stop="showLayerContextMenu($event, item.layer)">\
 								<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
 								<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" /><i v-if="isExtEdited(item.layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
@@ -1724,6 +1780,10 @@
 					this.tick;
 					var layer = getSelectedLayer();
 					return layer ? layer.blend_mode : 'default';
+				},
+				multiCount: function () {
+					this.tick;
+					return multiSelected.size;
 				},
 				psdLinked: function () {
 					this.tick;
@@ -1868,6 +1928,64 @@
 							}
 						}
 					];
+					// Add multi-select actions if applicable
+					if (multiSelected.size >= 2) {
+						items.push('_');
+						items.push({
+							name: 'Merge ' + multiSelected.size + ' Selected',
+							icon: 'merge',
+							click: function () {
+								mergeSelectedLayers();
+								self.tick++;
+							}
+						});
+						items.push({
+							name: 'Add Selected to Group',
+							icon: 'create_new_folder',
+							click: function () {
+								var gNames = Object.keys(_groups());
+								if (gNames.length === 0) {
+									Blockbench.textPrompt('New Group Name', 'Group 1', function (value) {
+										if (value) {
+											createLayerGroup(value);
+											multiSelected.forEach(function (uuid) { addLayerToGroup(value, uuid); });
+											multiSelected.clear();
+											updatePanel();
+										}
+									});
+								} else {
+									var menuItems = gNames.map(function (gn) {
+										return {
+											name: gn, icon: 'folder',
+											click: function () {
+												multiSelected.forEach(function (uuid) { addLayerToGroup(gn, uuid); });
+												multiSelected.clear();
+												syncLayerOrder();
+												updatePanel();
+											}
+										};
+									});
+									menuItems.push('_');
+									menuItems.push({
+										name: 'New Group...', icon: 'create_new_folder',
+										click: function () {
+											Blockbench.textPrompt('New Group Name', 'Group 1', function (value) {
+												if (value) {
+													createLayerGroup(value);
+													multiSelected.forEach(function (uuid) { addLayerToGroup(value, uuid); });
+													multiSelected.clear();
+													updatePanel();
+												}
+											});
+										}
+									});
+									var gmenu = new Menu(menuItems);
+									gmenu.open(event);
+									return; // Don't open the main menu
+								}
+							}
+						});
+					}
 					var menu = new Menu(items.filter(function (x) { return x !== null; }));
 					menu.open(event);
 				},
@@ -1893,12 +2011,66 @@
 				createGroup: function () {
 					createLayerGroup();
 				},
-				selectLayer: function (layer) {
-					layer.select();
+				selectLayer: function (layer, event) {
+					if (event && (event.ctrlKey || event.metaKey)) {
+						// Toggle multi-select
+						if (multiSelected.has(layer.uuid)) {
+							multiSelected.delete(layer.uuid);
+						} else {
+							multiSelected.add(layer.uuid);
+						}
+						// Also add current single-selected if first multi-select
+						var cur = TextureLayer.selected;
+						if (cur && multiSelected.size === 1 && cur !== layer) {
+							multiSelected.add(cur.uuid);
+						}
+						layer.select();
+					} else if (event && event.shiftKey) {
+						// Range select
+						var tex = getSelectedTexture();
+						if (tex && tex.layers_enabled) {
+							var allUUIDs = this.layerTree.reduce(function (acc, item) {
+								if (item.type === 'group') {
+									item.layers.forEach(function (l) { acc.push(l.uuid); });
+								} else {
+									acc.push(item.layer.uuid);
+								}
+								return acc;
+							}, []);
+							var cur = TextureLayer.selected;
+							var fromIdx = cur ? allUUIDs.indexOf(cur.uuid) : -1;
+							var toIdx = allUUIDs.indexOf(layer.uuid);
+							if (fromIdx !== -1 && toIdx !== -1) {
+								var start = Math.min(fromIdx, toIdx);
+								var end = Math.max(fromIdx, toIdx);
+								for (var si = start; si <= end; si++) {
+									multiSelected.add(allUUIDs[si]);
+								}
+							} else {
+								multiSelected.add(layer.uuid);
+							}
+						}
+						layer.select();
+					} else {
+						// Normal click - clear multi-select
+						multiSelected.clear();
+						layer.select();
+					}
 					this.tick++;
 				},
 				isSelected: function (layer) {
 					return TextureLayer.selected === layer;
+				},
+				isMultiSelected: function (layer) {
+					return multiSelected.has(layer.uuid);
+				},
+				mergeSelected: function () {
+					mergeSelectedLayers();
+					this.tick++;
+				},
+				clearMultiSelect: function () {
+					multiSelected.clear();
+					this.tick++;
 				},
 				isLocked: function (layer) {
 					return isLayerLocked(layer);
@@ -2315,12 +2487,18 @@
 				.lmp-control-row span { font-size: 11px; min-width: 36px; text-align: right; opacity: 0.7; }\
 				\
 				/* Layer list */\
+				.lmp-multi-bar { display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: color-mix(in srgb, var(--color-accent) 20%, var(--color-back)); border-bottom: 1px solid var(--color-accent); font-size: 11px; }\
+				.lmp-multi-bar span { flex: 1; font-weight: 600; opacity: 0.8; }\
+				.lmp-multi-bar button { display: flex; align-items: center; gap: 2px; background: var(--color-accent); color: var(--color-accent_text); border: none; border-radius: 3px; padding: 2px 8px; font-size: 11px; cursor: pointer; }\
+				.lmp-multi-bar button i { font-size: 14px; }\
+				.lmp-multi-bar button:hover { filter: brightness(1.15); }\
 				.lmp-layer-list { overflow-y: auto; }\
 				\
 				/* Layer items */\
 				.lmp-layer-item { display: flex; align-items: center; gap: 3px; padding: 4px 6px; border-radius: 4px; cursor: pointer; margin-bottom: 1px; background: var(--color-back); border: 1px solid transparent; transition: all 0.12s; }\
 				.lmp-layer-item:hover { background: var(--color-button); border-color: var(--color-border); }\
 				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-color: var(--color-accent); }\
+				.lmp-layer-item.multi-selected { background: color-mix(in srgb, var(--color-accent) 45%, var(--color-button)); border-color: var(--color-accent); outline: 1px dashed var(--color-accent); outline-offset: -1px; }\
 				.lmp-layer-item.locked { opacity: 0.55; }\
 				.lmp-preview-wrap { position: relative; flex-shrink: 0; width: 28px; height: 28px; }\
 				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); display: block; }\
@@ -2528,6 +2706,29 @@
 			updateInterval = setInterval(function () {
 				updatePanel();
 			}, 500);
+
+			// Restore LMP data from already-open project (handles plugin reload)
+			try {
+				if (Project && Project.save_path) {
+					// Project is already open, try to read LMP data from model
+					var codec = Codecs.project || Codecs.bedrock;
+					if (codec && codec.format && Format === codec.format) {
+						// The model data is in Project; try reading from saved bbmodel
+						var fs = require('fs');
+						if (Project.save_path && fs.existsSync(Project.save_path)) {
+							var raw = fs.readFileSync(Project.save_path, 'utf8');
+							var model = JSON.parse(raw);
+							if (model.layer_manager_pro) {
+								deserializeLmpData(model.layer_manager_pro);
+								setTimeout(reapplyAllFilterStacks, 200);
+								updatePanel();
+							}
+						}
+					}
+				}
+			} catch (e) {
+				console.warn('LMP: Failed to restore data on plugin reload:', e.message);
+			}
 		},
 
 		onunload: function () {
