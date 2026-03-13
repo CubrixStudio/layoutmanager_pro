@@ -610,6 +610,383 @@
 		);
 	}
 
+	// ---- Edit in External Editor (Photoshop link) ----
+
+	var externalEdits = {}; // { layerUUID: { path, watcher, texUUID } }
+
+	function editLayerExternal(layer) {
+		if (!layer) return;
+		var tex = getSelectedTexture();
+		if (!tex) return;
+		var uuid = layer.uuid;
+
+		// If already being edited externally, just re-open the file
+		if (externalEdits[uuid]) {
+			require('electron').shell.openPath(externalEdits[uuid].path);
+			Blockbench.showQuickMessage('Reopened in external editor', 1500);
+			return;
+		}
+
+		var fs = require('fs');
+		var path = require('path');
+		var os = require('os');
+
+		// Export layer to temp PNG
+		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
+		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
+		var safeName = (layer.name || 'layer').replace(/[^a-zA-Z0-9_-]/g, '_');
+		var tmpFile = path.join(tmpDir, safeName + '_' + uuid.slice(0, 8) + '.png');
+
+		// Write canvas to PNG file
+		var dataURL = layer.canvas.toDataURL('image/png');
+		var base64 = dataURL.replace(/^data:image\/png;base64,/, '');
+		fs.writeFileSync(tmpFile, Buffer.from(base64, 'base64'));
+
+		// Watch for file changes
+		var lastMtime = Date.now();
+		var pollInterval = setInterval(function () {
+			try {
+				var stat = fs.statSync(tmpFile);
+				var mtime = stat.mtimeMs;
+				if (mtime > lastMtime) {
+					lastMtime = mtime;
+					reimportExternalEdit(uuid, tmpFile);
+				}
+			} catch (e) {
+				// File deleted or inaccessible — stop watching
+				stopExternalEdit(uuid);
+			}
+		}, 500);
+
+		externalEdits[uuid] = { path: tmpFile, pollInterval: pollInterval, texUUID: tex.uuid };
+
+		// Open in default image editor (Photoshop if set as default for .png)
+		require('electron').shell.openPath(tmpFile);
+		Blockbench.showQuickMessage('Opened "' + layer.name + '" in external editor. Save there to sync back.', 3000);
+		updatePanel();
+	}
+
+	function reimportExternalEdit(uuid, filePath) {
+		var fs = require('fs');
+		var edit = externalEdits[uuid];
+		if (!edit) return;
+
+		var tex = Texture.all.find(function (t) { return t.uuid === edit.texUUID; });
+		if (!tex || !tex.layers_enabled) return;
+		var layer = tex.layers.find(function (l) { return l.uuid === uuid; });
+		if (!layer) return;
+
+		// Read the modified file and draw onto layer
+		var buf = fs.readFileSync(filePath);
+		var blob = new Blob([buf], { type: 'image/png' });
+		var url = URL.createObjectURL(blob);
+		var img = new Image();
+		img.onload = function () {
+			layer.ctx.clearRect(0, 0, layer.canvas.width, layer.canvas.height);
+			layer.ctx.drawImage(img, 0, 0);
+			URL.revokeObjectURL(url);
+			tex.updateLayerChanges(true);
+			updatePanel();
+			Blockbench.showQuickMessage('Layer "' + layer.name + '" synced from external editor', 1500);
+		};
+		img.onerror = function () {
+			URL.revokeObjectURL(url);
+		};
+		img.src = url;
+	}
+
+	function stopExternalEdit(uuid) {
+		var edit = externalEdits[uuid];
+		if (!edit) return;
+		if (edit.pollInterval) clearInterval(edit.pollInterval);
+		// Clean up temp file
+		try { require('fs').unlinkSync(edit.path); } catch (e) {}
+		delete externalEdits[uuid];
+		updatePanel();
+	}
+
+	function stopAllExternalEdits() {
+		for (var uuid in externalEdits) {
+			stopExternalEdit(uuid);
+		}
+	}
+
+	function isExternallyEdited(uuid) {
+		return !!externalEdits[uuid];
+	}
+
+	// ---- PSD Encoder / Decoder ----
+
+	function buildPSD(layers, docW, docH) {
+		var parts = [];
+		function w8(v) { var b = Buffer.alloc(1); b.writeUInt8(v); parts.push(b); }
+		function wi16(v) { var b = Buffer.alloc(2); b.writeInt16BE(v); parts.push(b); }
+		function wu16(v) { var b = Buffer.alloc(2); b.writeUInt16BE(v); parts.push(b); }
+		function wi32(v) { var b = Buffer.alloc(4); b.writeInt32BE(v); parts.push(b); }
+		function wu32(v) { var b = Buffer.alloc(4); b.writeUInt32BE(v); parts.push(b); }
+		function wbuf(b) { parts.push(Buffer.isBuffer(b) ? b : Buffer.from(b)); }
+		function wstr(s) { parts.push(Buffer.from(s, 'ascii')); }
+		function pos() { var n = 0; for (var i = 0; i < parts.length; i++) n += parts[i].length; return n; }
+		function ph32() { var idx = parts.length; wu32(0); return idx; }
+		function fill32(idx, v) { parts[idx].writeUInt32BE(v); }
+
+		// Prepare layer channel data
+		var lds = layers.map(function (layer, i) {
+			var w = layer.canvas.width, h = layer.canvas.height;
+			var px = layer.ctx.getImageData(0, 0, w, h).data;
+			var n = w * h;
+			var R = Buffer.alloc(n), G = Buffer.alloc(n), B = Buffer.alloc(n), A = Buffer.alloc(n);
+			for (var p = 0; p < n; p++) {
+				R[p] = px[p * 4]; G[p] = px[p * 4 + 1]; B[p] = px[p * 4 + 2]; A[p] = px[p * 4 + 3];
+			}
+			var ox = layer.offset ? layer.offset[0] : 0;
+			var oy = layer.offset ? layer.offset[1] : 0;
+			var nb = Buffer.from(layer.name || 'Layer ' + i, 'utf8');
+			if (nb.length > 255) nb = nb.slice(0, 255);
+			var npl = Math.ceil((1 + nb.length) / 4) * 4;
+			return { w: w, h: h, ox: ox, oy: oy, R: R, G: G, B: B, A: A, nb: nb, npl: npl,
+				op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
+				vis: layer.visible !== false };
+		});
+
+		// Header
+		wstr('8BPS'); wu16(1); wbuf(Buffer.alloc(6)); wu16(4);
+		wu32(docH); wu32(docW); wu16(8); wu16(3);
+		wu32(0); // color mode
+		wu32(0); // image resources
+
+		// Layer and Mask Info
+		var lmiIdx = ph32(); var lmiStart = pos();
+		var liIdx = ph32(); var liStart = pos();
+		wi16(-layers.length);
+
+		// Layer records
+		for (var i = 0; i < lds.length; i++) {
+			var d = lds[i]; var cdl = 2 + d.w * d.h;
+			wi32(d.oy); wi32(d.ox); wi32(d.oy + d.h); wi32(d.ox + d.w);
+			wu16(4);
+			wi16(-1); wu32(cdl); wi16(0); wu32(cdl); wi16(1); wu32(cdl); wi16(2); wu32(cdl);
+			wstr('8BIM'); wstr('norm');
+			w8(d.op); w8(0); w8(d.vis ? 0 : 2); w8(0);
+			wu32(4 + 4 + d.npl); wu32(0); wu32(0);
+			w8(d.nb.length); wbuf(d.nb);
+			var pad = d.npl - 1 - d.nb.length;
+			if (pad > 0) wbuf(Buffer.alloc(pad));
+		}
+
+		// Channel data
+		for (var i = 0; i < lds.length; i++) {
+			var d = lds[i];
+			wu16(0); wbuf(d.A); wu16(0); wbuf(d.R); wu16(0); wbuf(d.G); wu16(0); wbuf(d.B);
+		}
+
+		var liLen = pos() - liStart;
+		if (liLen % 2 !== 0) { w8(0); liLen++; }
+		fill32(liIdx, liLen);
+		wu32(0); // global layer mask
+		fill32(lmiIdx, pos() - lmiStart);
+
+		// Composite (white)
+		wu16(0);
+		var plane = Buffer.alloc(docW * docH, 255);
+		wbuf(plane); wbuf(plane); wbuf(plane); wbuf(plane);
+
+		return Buffer.concat(parts);
+	}
+
+	function parsePSD(buf) {
+		var o = { v: 0 };
+		function r8() { return buf.readUInt8(o.v++); }
+		function ri16() { var v = buf.readInt16BE(o.v); o.v += 2; return v; }
+		function ru16() { var v = buf.readUInt16BE(o.v); o.v += 2; return v; }
+		function ri32() { var v = buf.readInt32BE(o.v); o.v += 4; return v; }
+		function ru32() { var v = buf.readUInt32BE(o.v); o.v += 4; return v; }
+		function skip(n) { o.v += n; }
+
+		if (buf.toString('ascii', 0, 4) !== '8BPS') throw new Error('Not PSD');
+		o.v = 4;
+		ru16(); skip(6); var ch = ru16(); var h = ru32(); var w = ru32(); ru16(); ru16();
+		skip(ru32()); // color mode
+		skip(ru32()); // image resources
+
+		var lmiLen = ru32();
+		if (lmiLen === 0) return { width: w, height: h, layers: [] };
+		var lmiEnd = o.v + lmiLen;
+
+		var liLen = ru32();
+		if (liLen === 0) { o.v = lmiEnd; return { width: w, height: h, layers: [] }; }
+
+		var cnt = Math.abs(ri16());
+		var recs = [];
+		for (var i = 0; i < cnt; i++) {
+			var top = ri32(), left = ri32(), bottom = ri32(), right = ri32();
+			var chCnt = ru16();
+			var chInfo = [];
+			for (var c = 0; c < chCnt; c++) chInfo.push({ id: ri16(), len: ru32() });
+			skip(4); // blend sig
+			skip(4); // blend mode
+			var opacity = r8(); r8(); var flags = r8(); r8();
+			var extraLen = ru32(); var extraEnd = o.v + extraLen;
+			skip(ru32()); // mask data
+			skip(ru32()); // blending ranges
+			var nl = r8(); var name = buf.toString('utf8', o.v, o.v + nl); o.v += nl;
+			o.v = extraEnd;
+			recs.push({ top: top, left: left, w: right - left, h: bottom - top,
+				chInfo: chInfo, opacity: opacity, flags: flags, name: name,
+				visible: !(flags & 2) });
+		}
+
+		// Channel image data
+		var layers = [];
+		for (var i = 0; i < cnt; i++) {
+			var rec = recs[i]; var n = rec.w * rec.h; var chd = {};
+			for (var c = 0; c < rec.chInfo.length; c++) {
+				var cid = rec.chInfo[c].id; var comp = ru16();
+				if (comp === 0) {
+					chd[cid] = buf.slice(o.v, o.v + n); o.v += n;
+				} else if (comp === 1) {
+					// RLE PackBits
+					var slc = []; for (var y = 0; y < rec.h; y++) slc.push(ru16());
+					var out = Buffer.alloc(n); var ui = 0;
+					for (var y = 0; y < rec.h; y++) {
+						var le = o.v + slc[y];
+						while (o.v < le && ui < n) {
+							var b = buf.readInt8(o.v++);
+							if (b >= 0) { buf.copy(out, ui, o.v, o.v + b + 1); o.v += b + 1; ui += b + 1; }
+							else if (b > -128) { var vl = r8(); out.fill(vl, ui, ui + 1 - b); ui += 1 - b; }
+						}
+						o.v = le;
+					}
+					chd[cid] = out;
+				} else {
+					o.v += rec.chInfo[c].len - 2;
+					chd[cid] = Buffer.alloc(n);
+				}
+			}
+			var R = chd[0] || Buffer.alloc(n); var G = chd[1] || Buffer.alloc(n);
+			var B = chd[2] || Buffer.alloc(n); var A = chd[-1] || Buffer.alloc(n, 255);
+			var rgba = new Uint8ClampedArray(n * 4);
+			for (var p = 0; p < n; p++) {
+				rgba[p * 4] = R[p]; rgba[p * 4 + 1] = G[p]; rgba[p * 4 + 2] = B[p]; rgba[p * 4 + 3] = A[p];
+			}
+			layers.push({ name: rec.name, left: rec.left, top: rec.top, w: rec.w, h: rec.h,
+				opacity: Math.round(rec.opacity * 100 / 255), visible: rec.visible, rgba: rgba });
+		}
+		return { width: w, height: h, layers: layers };
+	}
+
+	// ---- Edit All Layers in Photoshop ----
+
+	var psdEditState = null; // { path, pollInterval, texUUID }
+
+	function editAllLayersExternal() {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled || tex.layers.length === 0) {
+			Blockbench.showQuickMessage('No layers to export', 1500);
+			return;
+		}
+
+		// If already editing, reopen
+		if (psdEditState && psdEditState.texUUID === tex.uuid) {
+			require('electron').shell.openPath(psdEditState.path);
+			Blockbench.showQuickMessage('Reopened PSD in external editor', 1500);
+			return;
+		}
+
+		// Stop previous edit if any
+		stopPsdEdit();
+
+		var fs = require('fs');
+		var path = require('path');
+		var os = require('os');
+		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
+		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
+
+		var psdBuf = buildPSD(tex.layers, tex.width, tex.height);
+		var safeName = (tex.name || 'texture').replace(/[^a-zA-Z0-9_-]/g, '_');
+		var tmpFile = path.join(tmpDir, safeName + '_' + tex.uuid.slice(0, 8) + '.psd');
+		fs.writeFileSync(tmpFile, psdBuf);
+
+		var lastMtime = Date.now();
+		var poll = setInterval(function () {
+			try {
+				var mtime = fs.statSync(tmpFile).mtimeMs;
+				if (mtime > lastMtime) {
+					lastMtime = mtime;
+					reimportPsdEdit(tmpFile);
+				}
+			} catch (e) { stopPsdEdit(); }
+		}, 800);
+
+		psdEditState = { path: tmpFile, pollInterval: poll, texUUID: tex.uuid };
+
+		require('electron').shell.openPath(tmpFile);
+		Blockbench.showQuickMessage('All layers exported to PSD. Save in Photoshop to sync back.', 3000);
+		updatePanel();
+	}
+
+	function reimportPsdEdit(filePath) {
+		if (!psdEditState) return;
+		var tex = Texture.all.find(function (t) { return t.uuid === psdEditState.texUUID; });
+		if (!tex || !tex.layers_enabled) return;
+
+		try {
+			var fs = require('fs');
+			var psdBuf = fs.readFileSync(filePath);
+			var parsed = parsePSD(psdBuf);
+
+			// Match layers by index
+			var count = Math.min(parsed.layers.length, tex.layers.length);
+			for (var i = 0; i < count; i++) {
+				var pl = parsed.layers[i];
+				var tl = tex.layers[i];
+				// Resize canvas if needed
+				if (tl.canvas.width !== pl.w || tl.canvas.height !== pl.h) {
+					tl.setSize(pl.w, pl.h);
+				}
+				var imgData = new ImageData(pl.rgba, pl.w, pl.h);
+				tl.ctx.clearRect(0, 0, pl.w, pl.h);
+				tl.ctx.putImageData(imgData, 0, 0);
+				if (pl.opacity != null) tl.opacity = pl.opacity;
+				tl.visible = pl.visible;
+				if (pl.name) tl.name = pl.name;
+				if (pl.left != null) tl.offset = [pl.left, pl.top];
+			}
+
+			// Add new layers from PSD if count increased
+			for (var i = count; i < parsed.layers.length; i++) {
+				var pl = parsed.layers[i];
+				var nl = new TextureLayer({ name: pl.name || 'Layer ' + (i + 1) }, tex);
+				nl.setSize(pl.w, pl.h);
+				nl.ctx.putImageData(new ImageData(pl.rgba, pl.w, pl.h), 0, 0);
+				if (pl.opacity != null) nl.opacity = pl.opacity;
+				nl.visible = pl.visible;
+				if (pl.left != null) nl.offset = [pl.left, pl.top];
+				nl.addForEditing();
+				_treeOrder().push(nl.uuid);
+			}
+
+			tex.updateLayerChanges(true);
+			updatePanel();
+			Blockbench.showQuickMessage('Layers synced from PSD (' + parsed.layers.length + ' layers)', 1500);
+		} catch (e) {
+			Blockbench.showQuickMessage('Error reading PSD: ' + e.message, 2000);
+		}
+	}
+
+	function stopPsdEdit() {
+		if (!psdEditState) return;
+		if (psdEditState.pollInterval) clearInterval(psdEditState.pollInterval);
+		try { require('fs').unlinkSync(psdEditState.path); } catch (e) {}
+		psdEditState = null;
+		updatePanel();
+	}
+
+	function isPsdEditing() {
+		var tex = getSelectedTexture();
+		return psdEditState && tex && psdEditState.texUUID === tex.uuid;
+	}
+
 	// ---- Mirror Operations ----
 
 	function mirrorLayerH(layer) {
@@ -956,6 +1333,8 @@
 						<button @click="mergeVisible" title="Merge Visible"><i class="material-icons">call_merge</i></button>\
 						<button @click="flattenAll" title="Flatten All"><i class="material-icons">layers_clear</i></button>\
 						<button @click="createGroup" title="Create Group"><i class="material-icons">create_new_folder</i></button>\
+						<button @click="editAllInPS" :title="psdLinked ? \'Reopen PSD in Photoshop\' : \'Edit All Layers in Photoshop\'" :class="{ \'lmp-btn-active\': psdLinked }"><i class="material-icons">photo_library</i></button>\
+						<button v-if="psdLinked" @click="stopPS" title="Stop Photoshop Link" class="lmp-btn-active"><i class="material-icons">link_off</i></button>\
 					</div>\
 					\
 					<div v-if="hasTexture && hasLayers" class="lmp-controls">\
@@ -1032,7 +1411,7 @@
 										@click="selectLayer(layer)"\
 										@contextmenu.prevent.stop="showLayerContextMenu($event, layer)">\
 										<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
-										<img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" />\
+										<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(layer)" draggable="false" /><i v-if="isExtEdited(layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
 										<button class="lmp-btn" @click.stop="toggleVis(layer)" :title="layer.visible ? \'Hide\' : \'Show\'">\
 											<i class="material-icons">{{ layer.visible ? "visibility" : "visibility_off" }}</i>\
 										</button>\
@@ -1063,7 +1442,7 @@
 								@click="selectLayer(item.layer)"\
 								@contextmenu.prevent.stop="showLayerContextMenu($event, item.layer)">\
 								<i class="material-icons lmp-drag-handle" @mousedown.stop>drag_indicator</i>\
-								<img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" />\
+								<span class="lmp-preview-wrap"><img class="lmp-layer-preview" :src="getPreview(item.layer)" draggable="false" /><i v-if="isExtEdited(item.layer)" class="material-icons lmp-ext-badge" title="Linked to external editor">link</i></span>\
 								<button class="lmp-btn" @click.stop="toggleVis(item.layer)" :title="item.layer.visible ? \'Hide\' : \'Show\'">\
 									<i class="material-icons">{{ item.layer.visible ? "visibility" : "visibility_off" }}</i>\
 								</button>\
@@ -1149,6 +1528,10 @@
 					var layer = getSelectedLayer();
 					return layer ? layer.blend_mode : 'default';
 				},
+				psdLinked: function () {
+					this.tick;
+					return isPsdEditing();
+				},
 				selectedFilters: function () {
 					this.tick;
 					var layer = getSelectedLayer();
@@ -1221,6 +1604,9 @@
 					this.tick; // refresh on tick
 					return getLayerPreviewDataURL(layer);
 				},
+				isExtEdited: function (layer) {
+					return isExternallyEdited(layer.uuid);
+				},
 				showLayerContextMenu: function (event, layer) {
 					var self = this;
 					var items = [
@@ -1240,6 +1626,24 @@
 								self.tick++;
 							}
 						},
+						'_',
+						{
+							name: isExternallyEdited(layer.uuid) ? 'Reopen in External Editor' : 'Edit in External Editor',
+							icon: 'open_in_new',
+							click: function () {
+								editLayerExternal(layer);
+								self.tick++;
+							}
+						},
+						isExternallyEdited(layer.uuid) ? {
+							name: 'Stop External Edit',
+							icon: 'link_off',
+							click: function () {
+								stopExternalEdit(layer.uuid);
+								Blockbench.showQuickMessage('External edit stopped', 1500);
+								self.tick++;
+							}
+						} : null,
 						'_',
 						{
 							name: 'Rename',
@@ -1267,8 +1671,17 @@
 							}
 						}
 					];
-					var menu = new Menu(items);
+					var menu = new Menu(items.filter(function (x) { return x !== null; }));
 					menu.open(event);
+				},
+				editAllInPS: function () {
+					editAllLayersExternal();
+					this.tick++;
+				},
+				stopPS: function () {
+					stopPsdEdit();
+					Blockbench.showQuickMessage('Photoshop link stopped', 1500);
+					this.tick++;
 				},
 				mergeVisible: mergeVisibleLayers,
 				flattenAll: flattenAllLayers,
@@ -1684,6 +2097,7 @@
 				.lmp-toolbar { display: flex; gap: 2px; margin-bottom: 8px; flex-wrap: wrap; }\
 				.lmp-toolbar button { background: var(--color-button); border: none; padding: 4px 7px; cursor: pointer; border-radius: 4px; display: flex; align-items: center; transition: background 0.15s; }\
 				.lmp-toolbar button:hover { background: var(--color-accent); color: var(--color-accent_text); }\
+				.lmp-toolbar button.lmp-btn-active { background: #4fc3f7; color: #000; }\
 				.lmp-toolbar button i { font-size: 18px; }\
 				\
 				/* Controls */\
@@ -1703,7 +2117,9 @@
 				.lmp-layer-item:hover { background: var(--color-button); border-color: var(--color-border); }\
 				.lmp-layer-item.selected { background: var(--color-accent); color: var(--color-accent_text); border-color: var(--color-accent); }\
 				.lmp-layer-item.locked { opacity: 0.55; }\
-				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; flex-shrink: 0; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); }\
+				.lmp-preview-wrap { position: relative; flex-shrink: 0; width: 28px; height: 28px; }\
+				.lmp-layer-preview { width: 28px; height: 28px; border-radius: 3px; border: 1px solid var(--color-border); image-rendering: pixelated; background: var(--color-back); display: block; }\
+				.lmp-ext-badge { position: absolute; bottom: -2px; right: -2px; font-size: 12px; color: #4fc3f7; background: var(--color-back); border-radius: 50%; line-height: 1; }\
 				.lmp-layer-name { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }\
 				\
 				/* Layer buttons */\
@@ -1878,6 +2294,8 @@
 
 			// Also listen for project close/switch to clear state
 			function onNewProject() {
+				stopAllExternalEdits();
+				stopPsdEdit();
 				clearLmpData();
 				updatePanel();
 			}
@@ -1908,6 +2326,9 @@
 		},
 
 		onunload: function () {
+			// Stop all external edits
+			stopAllExternalEdits();
+			stopPsdEdit();
 			// Remove event listeners
 			eventListeners.forEach(function (entry) {
 				Blockbench.removeListener(entry.event, entry.fn);
