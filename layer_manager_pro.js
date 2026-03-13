@@ -922,19 +922,40 @@
 			skip(ru32()); // mask data
 			skip(ru32()); // blending ranges
 			var nl = r8(); var name = buf.toString('utf8', o.v, o.v + nl); o.v += nl;
+			// Check for lsct (layer section divider) to detect group markers
+			var lsctType = -1;
+			var scan = o.v;
+			while (scan + 12 <= extraEnd) {
+				var sig = buf.toString('ascii', scan, scan + 4);
+				if (sig !== '8BIM' && sig !== '8B64') { scan++; continue; }
+				var key = buf.toString('ascii', scan + 4, scan + 8);
+				var dlen = buf.readUInt32BE(scan + 8);
+				if (key === 'lsct' || key === 'lsdk') {
+					lsctType = buf.readUInt32BE(scan + 12);
+					break;
+				}
+				scan += 12 + dlen;
+				if (scan % 2 !== 0) scan++;
+			}
 			o.v = extraEnd;
 			recs.push({ top: top, left: left, w: right - left, h: bottom - top,
 				chInfo: chInfo, opacity: opacity, flags: flags, name: name,
-				visible: !(flags & 2) });
+				visible: !(flags & 2), lsctType: lsctType });
 		}
 
 		// Channel image data
 		var layers = [];
 		for (var i = 0; i < cnt; i++) {
-			var rec = recs[i]; var n = rec.w * rec.h; var chd = {};
+			var rec = recs[i];
+			var isGroupMarker = rec.lsctType >= 0; // 0,1,2,3 = section dividers
+			var n = rec.w * rec.h;
+			var chd = {};
 			for (var c = 0; c < rec.chInfo.length; c++) {
 				var cid = rec.chInfo[c].id; var comp = ru16();
-				if (comp === 0) {
+				if (isGroupMarker || n === 0) {
+					// Skip channel data for group markers / empty layers
+					o.v += rec.chInfo[c].len - 2;
+				} else if (comp === 0) {
 					chd[cid] = buf.slice(o.v, o.v + n); o.v += n;
 				} else if (comp === 1) {
 					// RLE PackBits
@@ -955,6 +976,8 @@
 					chd[cid] = Buffer.alloc(n);
 				}
 			}
+			// Skip group markers - only import actual image layers
+			if (isGroupMarker || n === 0) continue;
 			var R = chd[0] || Buffer.alloc(n); var G = chd[1] || Buffer.alloc(n);
 			var B = chd[2] || Buffer.alloc(n); var A = chd[-1] || Buffer.alloc(n, 255);
 			var rgba = new Uint8ClampedArray(n * 4);
