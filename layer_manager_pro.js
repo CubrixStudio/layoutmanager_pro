@@ -878,136 +878,69 @@
 	// ---- Edit All Layers in Photoshop ----
 
 	var psdEditState = null; // { path, pollInterval, texUUID }
+	var DEFAULT_PS_PATH = 'C:\\Program Files\\Adobe\\Adobe Photoshop 2026\\Photoshop.exe';
 
 	function getPhotoshopPath() {
-		// Check localStorage first
-		try {
-			var saved = localStorage.getItem('lmp_photoshop_path');
-			if (saved && require('fs').existsSync(saved)) return saved;
-		} catch (e) {}
-		return null;
+		var saved = localStorage.getItem('lmp_photoshop_path');
+		if (saved) return saved;
+		return DEFAULT_PS_PATH;
 	}
 
-	function autoDetectPhotoshop() {
-		var fs = require('fs');
-		var path = require('path');
-		var candidates = [];
-		if (process.platform === 'win32') {
-			['C:\\Program Files\\Adobe', 'C:\\Program Files (x86)\\Adobe'].forEach(function (dir) {
-				try {
-					fs.readdirSync(dir).forEach(function (sub) {
-						if (/photoshop/i.test(sub)) {
-							var exe = path.join(dir, sub, 'Photoshop.exe');
-							if (fs.existsSync(exe)) candidates.push(exe);
-						}
-					});
-				} catch (e) {}
-			});
-		} else if (process.platform === 'darwin') {
-			try {
-				fs.readdirSync('/Applications').forEach(function (app) {
-					if (/photoshop/i.test(app) && /\.app$/i.test(app)) {
-						candidates.push('/Applications/' + app);
-					}
-				});
-			} catch (e) {}
-		}
-		return candidates.length > 0 ? candidates[candidates.length - 1] : null;
+	function setPhotoshopPath(p) {
+		localStorage.setItem('lmp_photoshop_path', p);
 	}
 
 	function openFileInPhotoshop(filePath, callback) {
 		var psPath = getPhotoshopPath();
-		if (!psPath) psPath = autoDetectPhotoshop();
+		var execFile = require('child_process').execFile;
 
-		if (psPath) {
-			localStorage.setItem('lmp_photoshop_path', psPath);
-			launchPS(psPath, filePath);
-			if (callback) callback(true);
-			return;
-		}
-
-		// Not found — ask user to browse
-		askForPhotoshopPath(function (chosenPath) {
-			if (chosenPath) {
-				localStorage.setItem('lmp_photoshop_path', chosenPath);
-				launchPS(chosenPath, filePath);
-				if (callback) callback(true);
-			} else {
-				Blockbench.showQuickMessage('Photoshop not configured. Cannot open PSD.', 2000);
-				if (callback) callback(false);
-			}
-		});
-	}
-
-	function launchPS(psPath, filePath) {
-		var exec = require('child_process').exec;
 		if (process.platform === 'win32') {
-			// Use start command with explicit exe path
-			var cmd = 'start "" "' + psPath + '" "' + filePath + '"';
-			exec(cmd, function (err) {
-				if (err) {
-					console.warn('LMP: Failed to launch Photoshop with start:', err);
-					// Fallback: direct exec
-					exec('"' + psPath + '" "' + filePath + '"');
-				}
+			execFile(psPath, [filePath], { windowsHide: false }, function (err) {
+				if (err) console.warn('LMP: Photoshop exec error (non-blocking):', err.message);
 			});
 		} else if (process.platform === 'darwin') {
-			exec('open -a "' + psPath + '" "' + filePath + '"');
+			require('child_process').exec('open -a "' + psPath + '" "' + filePath + '"');
 		} else {
-			exec('xdg-open "' + filePath + '"');
+			require('child_process').exec('xdg-open "' + filePath + '"');
 		}
+		if (callback) callback(true);
 	}
 
-	function askForPhotoshopPath(callback) {
-		// Use Electron dialog directly
-		try {
-			var remote = require('@electron/remote');
-			var result = remote.dialog.showOpenDialogSync(remote.getCurrentWindow(), {
-				title: 'Locate Adobe Photoshop',
-				message: 'Select Photoshop.exe (or Photoshop app on Mac)',
-				properties: ['openFile'],
-				filters: process.platform === 'win32'
-					? [{ name: 'Photoshop', extensions: ['exe'] }]
-					: [{ name: 'Application', extensions: ['app', '*'] }]
-			});
-			if (result && result.length > 0) {
-				callback(result[0]);
-			} else {
-				callback(null);
-			}
-		} catch (e) {
-			console.warn('LMP: @electron/remote failed, trying electron.remote:', e);
-			try {
-				var electron = require('electron');
-				if (electron.remote && electron.remote.dialog) {
-					var result = electron.remote.dialog.showOpenDialogSync({
-						title: 'Locate Adobe Photoshop',
-						properties: ['openFile'],
-						filters: process.platform === 'win32'
-							? [{ name: 'Photoshop', extensions: ['exe'] }]
-							: [{ name: 'Application', extensions: ['app', '*'] }]
-					});
-					if (result && result.length > 0) {
-						callback(result[0]);
-					} else {
-						callback(null);
-					}
-				} else {
-					// Last fallback: use Blockbench.import
+	function configurePhotoshopPath() {
+		var current = getPhotoshopPath();
+		var dialog = new Dialog({
+			id: 'lmp_ps_config',
+			title: 'Photoshop Configuration',
+			form: {
+				ps_path: { label: 'Photoshop Path', type: 'text', value: current },
+				info: { type: 'info', text: 'Default: ' + DEFAULT_PS_PATH }
+			},
+			buttons: ['dialog.confirm', 'Browse...', 'dialog.cancel'],
+			onButton: function (idx) {
+				if (idx === 1) {
+					// Browse button
 					Blockbench.import({
 						extensions: ['exe'],
 						type: 'Locate Photoshop.exe',
 						readtype: 'none',
-						resource_id: 'lmp_photoshop_path'
+						resource_id: 'lmp_photoshop_path',
+						startpath: 'C:\\Program Files\\Adobe'
 					}, function (files) {
-						callback(files && files.length > 0 ? files[0].path : null);
+						if (files && files.length > 0) {
+							dialog.setFormValues({ ps_path: files[0].path });
+						}
 					});
+					return false; // keep dialog open
 				}
-			} catch (e2) {
-				console.warn('LMP: All dialog methods failed:', e2);
-				callback(null);
+			},
+			onConfirm: function (formData) {
+				if (formData.ps_path && formData.ps_path.trim()) {
+					setPhotoshopPath(formData.ps_path.trim());
+					Blockbench.showQuickMessage('Photoshop path saved', 1500);
+				}
 			}
-		}
+		});
+		dialog.show();
 	}
 
 	function editAllLayersExternal() {
@@ -1473,6 +1406,7 @@
 						<button @click="createGroup" title="Create Group"><i class="material-icons">create_new_folder</i></button>\
 						<button @click="editAllInPS" :title="psdLinked ? \'Reopen PSD in Photoshop\' : \'Edit All Layers in Photoshop\'" :class="{ \'lmp-btn-active\': psdLinked }"><i class="material-icons">photo_library</i></button>\
 						<button v-if="psdLinked" @click="stopPS" title="Stop Photoshop Link" class="lmp-btn-active"><i class="material-icons">link_off</i></button>\
+						<button @click="configPS" title="Configure Photoshop Path"><i class="material-icons">settings</i></button>\
 					</div>\
 					\
 					<div v-if="hasTexture && hasLayers" class="lmp-controls">\
@@ -1815,6 +1749,9 @@
 				editAllInPS: function () {
 					editAllLayersExternal();
 					this.tick++;
+				},
+				configPS: function () {
+					configurePhotoshopPath();
 				},
 				stopPS: function () {
 					stopPsdEdit();
