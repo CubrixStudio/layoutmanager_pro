@@ -730,6 +730,10 @@
 		function ph32() { var idx = parts.length; wu32(0); return idx; }
 		function fill32(idx, v) { parts[idx].writeUInt32BE(v); }
 
+		// Filter out layers without valid canvas
+		layers = layers.filter(function (l) { return l.canvas && l.canvas.width > 0 && l.canvas.height > 0; });
+		if (layers.length === 0) throw new Error('No valid layers to export');
+
 		// Prepare layer channel data
 		var lds = layers.map(function (layer, i) {
 			var w = layer.canvas.width, h = layer.canvas.height;
@@ -966,34 +970,44 @@
 		var tmpDir = path.join(os.tmpdir(), 'blockbench_lmp');
 		try { fs.mkdirSync(tmpDir, { recursive: true }); } catch (e) {}
 
-		var psdBuf = buildPSD(tex.layers, tex.width, tex.height);
+		var psdBuf;
+		try {
+			psdBuf = buildPSD(tex.layers, tex.width, tex.height);
+		} catch (e) {
+			console.error('LMP: buildPSD failed:', e);
+			Blockbench.showQuickMessage('Error building PSD: ' + e.message, 3000);
+			return;
+		}
 		var safeName = (tex.name || 'texture').replace(/[^a-zA-Z0-9_-]/g, '_');
 		var tmpFile = path.join(tmpDir, safeName + '_' + tex.uuid.slice(0, 8) + '.psd');
-		fs.writeFileSync(tmpFile, psdBuf);
+		try {
+			fs.writeFileSync(tmpFile, psdBuf);
+		} catch (e) {
+			console.error('LMP: Failed to write PSD:', e);
+			Blockbench.showQuickMessage('Error writing PSD: ' + e.message, 3000);
+			return;
+		}
 
-		// Open in Photoshop first, only start link if successful
-		openFileInPhotoshop(tmpFile, function (success) {
-			if (!success) {
-				try { fs.unlinkSync(tmpFile); } catch (e) {}
-				return;
-			}
+		console.log('LMP: PSD written to', tmpFile, '(' + psdBuf.length + ' bytes)');
 
-			var lastMtime = Date.now();
-			var poll = setInterval(function () {
-				try {
-					var mtime = fs.statSync(tmpFile).mtimeMs;
-					if (mtime > lastMtime) {
-						lastMtime = mtime;
-						reimportPsdEdit(tmpFile);
-					}
-				} catch (e) { stopPsdEdit(); }
-			}, 800);
+		// Start polling immediately, then open Photoshop
+		var lastMtime = Date.now();
+		var poll = setInterval(function () {
+			try {
+				var mtime = fs.statSync(tmpFile).mtimeMs;
+				if (mtime > lastMtime) {
+					lastMtime = mtime;
+					reimportPsdEdit(tmpFile);
+				}
+			} catch (e) { stopPsdEdit(); }
+		}, 800);
 
-			psdEditState = { path: tmpFile, pollInterval: poll, texUUID: tex.uuid };
-			Blockbench.showQuickMessage('All layers exported to PSD. Save in Photoshop to sync back.', 3000);
-			updatePanel();
-		});
+		psdEditState = { path: tmpFile, pollInterval: poll, texUUID: tex.uuid };
 		updatePanel();
+
+		// Launch Photoshop
+		openFileInPhotoshop(tmpFile);
+		Blockbench.showQuickMessage('All layers exported to PSD. Save in Photoshop to sync back.', 3000);
 	}
 
 	function reimportPsdEdit(filePath) {
@@ -1747,7 +1761,12 @@
 					menu.open(event);
 				},
 				editAllInPS: function () {
-					editAllLayersExternal();
+					try {
+						editAllLayersExternal();
+					} catch (e) {
+						console.error('LMP: editAllLayersExternal error:', e);
+						Blockbench.showQuickMessage('Error: ' + e.message, 3000);
+					}
 					this.tick++;
 				},
 				configPS: function () {
