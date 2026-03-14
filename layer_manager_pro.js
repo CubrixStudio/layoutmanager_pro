@@ -1365,42 +1365,75 @@
 	}
 
 	function parsePSD(buf) {
+		var bufLen = buf.length;
 		var o = { v: 0 };
-		function r8() { return buf.readUInt8(o.v++); }
-		function ri16() { var v = buf.readInt16BE(o.v); o.v += 2; return v; }
-		function ru16() { var v = buf.readUInt16BE(o.v); o.v += 2; return v; }
-		function ri32() { var v = buf.readInt32BE(o.v); o.v += 4; return v; }
-		function ru32() { var v = buf.readUInt32BE(o.v); o.v += 4; return v; }
-		function skip(n) { o.v += n; }
+		function check(n) { if (o.v + n > bufLen) throw new Error('Unexpected end of PSD data at offset ' + o.v + ' (need ' + n + ' bytes, buf=' + bufLen + ')'); }
+		function r8() { check(1); return buf.readUInt8(o.v++); }
+		function ri16() { check(2); var v = buf.readInt16BE(o.v); o.v += 2; return v; }
+		function ru16() { check(2); var v = buf.readUInt16BE(o.v); o.v += 2; return v; }
+		function ri32() { check(4); var v = buf.readInt32BE(o.v); o.v += 4; return v; }
+		function ru32() { check(4); var v = buf.readUInt32BE(o.v); o.v += 4; return v; }
+		function skip(n) {
+			if (n < 0) n = 0;
+			if (o.v + n > bufLen) { o.v = bufLen; return; }
+			o.v += n;
+		}
+		function safeSlice(len) {
+			if (len <= 0) return Buffer.alloc(0);
+			var end = Math.min(o.v + len, bufLen);
+			var sl = buf.slice(o.v, end);
+			o.v = end;
+			return sl;
+		}
 
-		if (buf.toString('ascii', 0, 4) !== '8BPS') throw new Error('Not PSD');
+		if (bufLen < 26 || buf.toString('ascii', 0, 4) !== '8BPS') throw new Error('Not PSD');
 		o.v = 4;
 		ru16(); skip(6); var ch = ru16(); var h = ru32(); var w = ru32(); ru16(); ru16();
-		skip(ru32()); // color mode
-		skip(ru32()); // image resources
+		var cmLen = ru32(); skip(cmLen); // color mode
+		var irLen = ru32(); skip(irLen); // image resources
 
+		if (o.v + 4 > bufLen) return { width: w, height: h, layers: [] };
 		var lmiLen = ru32();
 		if (lmiLen === 0) return { width: w, height: h, layers: [] };
-		var lmiEnd = o.v + lmiLen;
+		var lmiEnd = Math.min(o.v + lmiLen, bufLen);
 
+		if (o.v + 4 > lmiEnd) { o.v = lmiEnd; return { width: w, height: h, layers: [] }; }
 		var liLen = ru32();
 		if (liLen === 0) { o.v = lmiEnd; return { width: w, height: h, layers: [] }; }
+		var liEnd = Math.min(o.v + liLen, bufLen);
 
 		var cnt = Math.abs(ri16());
 		var recs = [];
 		for (var i = 0; i < cnt; i++) {
+			if (o.v + 18 > bufLen) break; // not enough data for a layer record
 			var top = ri32(), left = ri32(), bottom = ri32(), right = ri32();
 			var chCnt = ru16();
+			if (chCnt > 56) { chCnt = 0; } // sanity check
 			var chInfo = [];
-			for (var c = 0; c < chCnt; c++) chInfo.push({ id: ri16(), len: ru32() });
+			for (var c = 0; c < chCnt; c++) {
+				if (o.v + 6 > bufLen) break;
+				chInfo.push({ id: ri16(), len: ru32() });
+			}
+			if (o.v + 12 > bufLen) break;
 			skip(4); // blend sig
 			skip(4); // blend mode
 			var opacity = r8(); r8(); var flags = r8(); r8();
-			var extraLen = ru32(); var extraEnd = o.v + extraLen;
-			skip(ru32()); // mask data
-			skip(ru32()); // blending ranges
-			var nl = r8(); var name = buf.toString('utf8', o.v, o.v + nl); o.v += nl;
-			// Check for lsct (layer section divider) to detect group markers
+			var extraLen = ru32();
+			var extraEnd = Math.min(o.v + extraLen, bufLen);
+			// Mask data
+			if (o.v + 4 <= extraEnd) { var maskLen = ru32(); skip(maskLen); }
+			// Blending ranges
+			if (o.v + 4 <= extraEnd) { var brLen = ru32(); skip(brLen); }
+			// Pascal string name (padded to 4 bytes)
+			var name = '';
+			if (o.v < extraEnd) {
+				var nl = r8();
+				if (o.v + nl <= bufLen) {
+					name = buf.toString('utf8', o.v, o.v + nl);
+					o.v += nl;
+				}
+			}
+			// Scan for lsct (layer section divider) in additional layer info
 			var lsctType = -1;
 			var scan = o.v;
 			while (scan + 12 <= extraEnd) {
@@ -1409,52 +1442,76 @@
 				var key = buf.toString('ascii', scan + 4, scan + 8);
 				var dlen = buf.readUInt32BE(scan + 8);
 				if (key === 'lsct' || key === 'lsdk') {
-					lsctType = buf.readUInt32BE(scan + 12);
+					if (scan + 16 <= bufLen) lsctType = buf.readUInt32BE(scan + 12);
 					break;
 				}
 				scan += 12 + dlen;
 				if (scan % 2 !== 0) scan++;
 			}
 			o.v = extraEnd;
-			recs.push({ top: top, left: left, w: right - left, h: bottom - top,
+			recs.push({ top: top, left: left, w: Math.max(0, right - left), h: Math.max(0, bottom - top),
 				chInfo: chInfo, opacity: opacity, flags: flags, name: name,
 				visible: !(flags & 2), lsctType: lsctType });
 		}
 
 		// Channel image data
 		var layers = [];
-		for (var i = 0; i < cnt; i++) {
+		for (var i = 0; i < recs.length; i++) {
 			var rec = recs[i];
-			var isGroupMarker = rec.lsctType >= 0; // 0,1,2,3 = section dividers
+			var isGroupMarker = rec.lsctType >= 0;
 			var n = rec.w * rec.h;
 			var chd = {};
 			for (var c = 0; c < rec.chInfo.length; c++) {
-				var cid = rec.chInfo[c].id; var comp = ru16();
-				if (isGroupMarker || n === 0) {
+				var chDataLen = rec.chInfo[c].len;
+				var chStart = o.v;
+				var chEnd = Math.min(o.v + chDataLen, bufLen);
+				var cid = rec.chInfo[c].id;
+
+				if (o.v + 2 > bufLen) { o.v = chEnd; continue; }
+				var comp = ru16();
+
+				if (isGroupMarker || n === 0 || chDataLen <= 2) {
 					// Skip channel data for group markers / empty layers
-					o.v += rec.chInfo[c].len - 2;
+					o.v = chEnd;
 				} else if (comp === 0) {
-					chd[cid] = buf.slice(o.v, o.v + n); o.v += n;
+					// Raw uncompressed
+					var rawLen = Math.min(n, chEnd - o.v);
+					chd[cid] = safeSlice(rawLen);
+					o.v = chEnd; // ensure we advance to the right position
 				} else if (comp === 1) {
 					// RLE PackBits
-					var slc = []; for (var y = 0; y < rec.h; y++) slc.push(ru16());
-					var out = Buffer.alloc(n); var ui = 0;
+					if (o.v + rec.h * 2 > bufLen) { o.v = chEnd; continue; }
+					var slc = [];
+					for (var y = 0; y < rec.h; y++) slc.push(ru16());
+					var out = Buffer.alloc(n);
+					var ui = 0;
 					for (var y = 0; y < rec.h; y++) {
-						var le = o.v + slc[y];
-						while (o.v < le && ui < n) {
+						var rowEnd = Math.min(o.v + slc[y], chEnd, bufLen);
+						while (o.v < rowEnd && ui < n) {
+							if (o.v >= bufLen) break;
 							var b = buf.readInt8(o.v++);
-							if (b >= 0) { buf.copy(out, ui, o.v, o.v + b + 1); o.v += b + 1; ui += b + 1; }
-							else if (b > -128) { var vl = r8(); out.fill(vl, ui, ui + 1 - b); ui += 1 - b; }
+							if (b >= 0) {
+								var copyLen = Math.min(b + 1, n - ui, bufLen - o.v);
+								if (copyLen > 0) { buf.copy(out, ui, o.v, o.v + copyLen); o.v += copyLen; ui += copyLen; }
+							} else if (b > -128) {
+								if (o.v < bufLen) {
+									var vl = buf.readUInt8(o.v++);
+									var fillLen = Math.min(1 - b, n - ui);
+									out.fill(vl, ui, ui + fillLen);
+									ui += fillLen;
+								}
+							}
 						}
-						o.v = le;
+						o.v = rowEnd;
 					}
 					chd[cid] = out;
+					o.v = chEnd; // ensure correct position
 				} else {
-					o.v += rec.chInfo[c].len - 2;
+					// Unknown compression: skip using channel length
+					o.v = chEnd;
 					chd[cid] = Buffer.alloc(n);
 				}
 			}
-			// Skip group markers - only import actual image layers
 			if (isGroupMarker || n === 0) continue;
 			var R = chd[0] || Buffer.alloc(n); var G = chd[1] || Buffer.alloc(n);
 			var B = chd[2] || Buffer.alloc(n); var A = chd[-1] || Buffer.alloc(n, 255);
