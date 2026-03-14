@@ -449,18 +449,12 @@
 			}
 		}
 
+		var exitGroupName = maskEditMode.groupName;
+
 		if (layer && maskEditMode.savedCanvas && maskEditMode.savedCtx) {
-			// The mask canvas may have been painted on - it's already the mask object's canvas
-			// so mask data is up to date. Just restore the layer canvas.
+			// Restore the real canvas/ctx on the swapped layer
 			layer.canvas = maskEditMode.savedCanvas;
 			layer.ctx = maskEditMode.savedCtx;
-
-			// Re-snapshot and re-apply mask
-			var mask = maskEditMode.groupName ? null : layerMasks[layer.uuid];
-			if (mask) {
-				mask.original = null; // Force re-snapshot
-			}
-			applyMaskToLayer(layer);
 		}
 
 		maskEditMode.active = false;
@@ -468,6 +462,27 @@
 		maskEditMode.groupName = null;
 		maskEditMode.savedCanvas = null;
 		maskEditMode.savedCtx = null;
+
+		if (exitGroupName) {
+			// Group mask: re-apply to ALL layers in the group
+			var grp = _groups()[exitGroupName];
+			if (grp) {
+				grp.forEach(function (uuid) {
+					var gl = findLayerByUUID(uuid);
+					if (gl) {
+						// Reset mask originals so they get re-snapshotted
+						var lm = layerMasks[gl.uuid];
+						if (lm) lm.original = null;
+						applyMaskToLayer(gl);
+					}
+				});
+			}
+		} else if (layer) {
+			// Layer mask: re-apply to this layer only
+			var mask = layerMasks[layer.uuid];
+			if (mask) mask.original = null; // Force re-snapshot
+			applyMaskToLayer(layer);
+		}
 
 		if (tex) tex.updateLayerChanges(true);
 		updatePanel();
@@ -2245,7 +2260,7 @@
 					<div v-if="hasTexture && hasLayers" class="lmp-layer-list">\
 						<template v-for="item in layerTree">\
 							\
-							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name) }">\
+							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name), \'mask-editing\': isGroupMaskEditing(item.name) }">\
 								<div class="lmp-group-header"\
 									draggable="true"\
 									@click="toggleCollapse(item.name)"\
@@ -2833,6 +2848,10 @@
 					this.tick;
 					return maskEditMode.active && maskEditMode.layerUUID === layer.uuid;
 				},
+				isGroupMaskEditing: function (name) {
+					this.tick;
+					return maskEditMode.active && maskEditMode.groupName === name;
+				},
 				exitMaskEditMode: function () {
 					exitMaskEdit();
 					this.tick++;
@@ -2969,6 +2988,22 @@
 							icon: 'gradient',
 							click: function () {
 								addGroupMaskBlack(groupName);
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: maskEditMode.active && maskEditMode.groupName === groupName ? 'Exit Mask Edit' : 'Edit Group Mask',
+							icon: 'brush',
+							click: function () {
+								if (maskEditMode.active && maskEditMode.groupName === groupName) {
+									exitMaskEdit();
+								} else {
+									var grp = _groups()[groupName];
+									if (grp && grp.length > 0) {
+										var layer = findLayerByUUID(grp[0]);
+										if (layer) enterMaskEdit(layer, groupName);
+									}
+								}
 								self.tick++;
 							}
 						} : null,
@@ -3452,6 +3487,9 @@
 				.lmp-mask-edit-bar span { flex: 1; }\
 				.lmp-layer-item.mask-editing { border-color: #e65100 !important; background: color-mix(in srgb, #e65100 25%, var(--color-back)) !important; }\
 				.lmp-layer-item.mask-editing .lmp-mask-thumb { border-color: #e65100; box-shadow: 0 0 4px #e65100; }\
+				.lmp-group.mask-editing { border-color: #e65100 !important; }\
+				.lmp-group.mask-editing .lmp-group-header { background: color-mix(in srgb, #e65100 30%, var(--color-button)); }\
+				.lmp-group.mask-editing .lmp-mask-thumb-sm { border-color: #e65100; box-shadow: 0 0 4px #e65100; }\
 				\
 				/* Drag & Drop */\
 				.lmp-drag-handle { font-size: 14px; opacity: 0.25; cursor: grab; flex-shrink: 0; transition: opacity 0.12s; }\
