@@ -390,7 +390,10 @@
 	// ---- Mask Editing Mode ----
 
 	function enterMaskEdit(layer, groupName) {
-		if (!layer || !layer.canvas) return;
+		if (!layer || !layer.canvas) {
+			console.warn('LMP enterMaskEdit: no layer or no layer.canvas', layer, groupName);
+			return;
+		}
 		// Exit current mask edit if active
 		if (maskEditMode.active) exitMaskEdit();
 
@@ -400,7 +403,11 @@
 		} else {
 			mask = layerMasks[layer.uuid];
 		}
-		if (!mask || !mask.canvas) return;
+		if (!mask || !mask.canvas) {
+			console.warn('LMP enterMaskEdit: no mask or no mask.canvas', groupName, mask);
+			return;
+		}
+		console.log('LMP enterMaskEdit: OK, entering mask edit for', groupName || layer.uuid);
 
 		// Ensure mask canvas matches layer dimensions
 		if (mask.canvas.width !== layer.canvas.width || mask.canvas.height !== layer.canvas.height) {
@@ -2995,13 +3002,18 @@
 							name: maskEditMode.active && maskEditMode.groupName === groupName ? 'Exit Mask Edit' : 'Edit Group Mask',
 							icon: 'brush',
 							click: function () {
+								console.log('LMP Edit Group Mask clicked, groupName:', groupName);
 								if (maskEditMode.active && maskEditMode.groupName === groupName) {
 									exitMaskEdit();
 								} else {
 									var grp = _groups()[groupName];
+									console.log('LMP grp:', grp);
 									if (grp && grp.length > 0) {
 										var layer = findLayerByUUID(grp[0]);
+										console.log('LMP layer found:', !!layer, layer ? layer.uuid : 'null');
 										if (layer) enterMaskEdit(layer, groupName);
+									} else {
+										console.warn('LMP: group empty or not found');
 									}
 								}
 								self.tick++;
