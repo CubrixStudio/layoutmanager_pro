@@ -1279,19 +1279,18 @@
 					op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
 					vis: layer.visible !== false, lsct: -1 });
 			} else if (e.type === 'group_end') {
-				// In PSD bottom-to-top: group_end = bounding section divider (lsct type 3)
-				// This comes first (bottom) for the group
+				// After reverse: group_end is first in PSD (bottom) = bounding section divider
+				var dnb = Buffer.from('</Layer group>', 'utf8');
+				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
+				lds.push({ kind: 'group_close', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
+					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
+			} else if (e.type === 'group_start') {
+				// After reverse: group_start is last in PSD (top) = open folder with group name
 				var gnb = Buffer.from(e.name, 'utf8');
 				if (gnb.length > 255) gnb = gnb.slice(0, 255);
 				var gnpl = Math.ceil((1 + gnb.length) / 4) * 4;
 				lds.push({ kind: 'group_open', w: 0, h: 0, ox: 0, oy: 0, nb: gnb, npl: gnpl,
 					op: 255, vis: true, lsct: 1 }); // lsct=1: open folder
-			} else if (e.type === 'group_start') {
-				// In PSD bottom-to-top: group_start = bounding divider (appears at top = last in bottom-to-top)
-				var dnb = Buffer.from('</Layer group>', 'utf8');
-				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
-				lds.push({ kind: 'group_end', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
-					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
 			}
 		}
 
