@@ -62,6 +62,15 @@
 		filterId: null,
 	};
 
+	// ---- Mask Editing Mode state ----
+	var maskEditMode = {
+		active: false,
+		layerUUID: null,
+		groupName: null,       // null = layer mask, string = group mask
+		savedCanvas: null,
+		savedCtx: null,
+	};
+
 	function getDragPos(event, element) {
 		var rect = element.getBoundingClientRect();
 		var ratio = (event.clientY - rect.top) / rect.height;
@@ -198,6 +207,9 @@
 
 	function removeLayerMask(layer, apply) {
 		if (!layer) return;
+		if (maskEditMode.active && maskEditMode.layerUUID === layer.uuid && !maskEditMode.groupName) {
+			exitMaskEdit();
+		}
 		var mask = layerMasks[layer.uuid];
 		if (!mask) return;
 		if (apply) {
@@ -263,6 +275,9 @@
 	}
 
 	function removeGroupMask(groupName, apply) {
+		if (maskEditMode.active && maskEditMode.groupName === groupName) {
+			exitMaskEdit();
+		}
 		var mask = groupMasks[groupName];
 		if (!mask) return;
 		var grp = _groups()[groupName];
@@ -370,6 +385,96 @@
 				recomputeFilters(layer);
 			}
 		}
+	}
+
+	// ---- Mask Editing Mode ----
+
+	function enterMaskEdit(layer, groupName) {
+		if (!layer || !layer.canvas) return;
+		// Exit current mask edit if active
+		if (maskEditMode.active) exitMaskEdit();
+
+		var mask;
+		if (groupName) {
+			mask = groupMasks[groupName];
+		} else {
+			mask = layerMasks[layer.uuid];
+		}
+		if (!mask || !mask.canvas) return;
+
+		// Ensure mask canvas matches layer dimensions
+		if (mask.canvas.width !== layer.canvas.width || mask.canvas.height !== layer.canvas.height) {
+			var oldData = mask.ctx.getImageData(0, 0, mask.canvas.width, mask.canvas.height);
+			mask.canvas.width = layer.canvas.width;
+			mask.canvas.height = layer.canvas.height;
+			mask.ctx.fillStyle = '#ffffff';
+			mask.ctx.fillRect(0, 0, mask.canvas.width, mask.canvas.height);
+			mask.ctx.putImageData(oldData, 0, 0);
+		}
+
+		// Restore layer to its unmasked state before swapping
+		if (!groupName && layerMasks[layer.uuid] && layerMasks[layer.uuid].original) {
+			layer.ctx.putImageData(layerMasks[layer.uuid].original, 0, 0);
+		}
+
+		// Save the real canvas/ctx
+		maskEditMode.savedCanvas = layer.canvas;
+		maskEditMode.savedCtx = layer.ctx;
+		maskEditMode.layerUUID = layer.uuid;
+		maskEditMode.groupName = groupName || null;
+
+		// Swap: Blockbench will now paint on the mask canvas
+		layer.canvas = mask.canvas;
+		layer.ctx = mask.ctx;
+		maskEditMode.active = true;
+
+		// Select this layer so Blockbench targets it
+		layer.select();
+		var tex = getSelectedTexture();
+		if (tex) tex.updateLayerChanges(true);
+		updatePanel();
+		Blockbench.showQuickMessage('Mask edit mode - Paint white (show) / black (hide)', 2000);
+	}
+
+	function exitMaskEdit() {
+		if (!maskEditMode.active) return;
+		var tex = getSelectedTexture();
+		var layer = null;
+		if (tex && tex.layers_enabled) {
+			for (var i = 0; i < tex.layers.length; i++) {
+				if (tex.layers[i].uuid === maskEditMode.layerUUID) {
+					layer = tex.layers[i];
+					break;
+				}
+			}
+		}
+
+		if (layer && maskEditMode.savedCanvas && maskEditMode.savedCtx) {
+			// The mask canvas may have been painted on - it's already the mask object's canvas
+			// so mask data is up to date. Just restore the layer canvas.
+			layer.canvas = maskEditMode.savedCanvas;
+			layer.ctx = maskEditMode.savedCtx;
+
+			// Re-snapshot and re-apply mask
+			var mask = maskEditMode.groupName ? null : layerMasks[layer.uuid];
+			if (mask) {
+				mask.original = null; // Force re-snapshot
+			}
+			applyMaskToLayer(layer);
+		}
+
+		maskEditMode.active = false;
+		maskEditMode.layerUUID = null;
+		maskEditMode.groupName = null;
+		maskEditMode.savedCanvas = null;
+		maskEditMode.savedCtx = null;
+
+		if (tex) tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function isMaskEditActive() {
+		return maskEditMode.active;
 	}
 
 	function getMaskPreviewDataURL(maskObj) {
@@ -1969,6 +2074,7 @@
 
 	function saveLmpToLocalStorage() {
 		if (_restoring) return; // Don't save during restore
+		if (maskEditMode.active) return; // Don't save while canvas is swapped
 		var tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return; // No project/texture open
 		var key = _lmpStorageKey();
@@ -2074,6 +2180,11 @@
 						<button @click="mergeSelected" v-if="multiCount >= 2" title="Merge Selected"><i class="material-icons">merge</i> Merge</button>\
 						<button @click="clearMultiSelect" title="Clear Selection"><i class="material-icons">close</i></button>\
 					</div>\
+					<div v-if="maskEditing" class="lmp-mask-edit-bar" @click="exitMaskEditMode">\
+						<i class="material-icons">brush</i>\
+						<span>Editing Mask - White = visible / Black = hidden</span>\
+						<i class="material-icons">close</i>\
+					</div>\
 					<div v-if="hasTexture && hasLayers" class="lmp-layer-list">\
 						<template v-for="item in layerTree">\
 							\
@@ -2111,7 +2222,7 @@
 									@drop.prevent.stop="dropOnGroupBody($event, item.name)">\
 									<div v-for="(layer, li) in item.layers" :key="layer.uuid"\
 										class="lmp-layer-item lmp-grouped"\
-										:class="{ selected: isSelected(layer), \'multi-selected\': isMultiSelected(layer), locked: isLocked(layer), \'lmp-drop-above\': dropId === layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === layer.uuid && dropPos === \'after\' }"\
+										:class="{ selected: isSelected(layer), \'multi-selected\': isMultiSelected(layer), locked: isLocked(layer), \'mask-editing\': isMaskEditing(layer), \'lmp-drop-above\': dropId === layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === layer.uuid && dropPos === \'after\' }"\
 										draggable="true"\
 										@dragstart.stop="startDragLayer($event, layer.uuid, item.name)"\
 										@dragover.prevent.stop="dragOverGroupedLayer($event, layer.uuid)"\
@@ -2145,7 +2256,7 @@
 							\
 							<div v-else :key="\'l-\' + item.layer.uuid"\
 								class="lmp-layer-item"\
-								:class="{ selected: isSelected(item.layer), \'multi-selected\': isMultiSelected(item.layer), locked: isLocked(item.layer), \'lmp-drop-above\': dropId === item.layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === item.layer.uuid && dropPos === \'after\' }"\
+								:class="{ selected: isSelected(item.layer), \'multi-selected\': isMultiSelected(item.layer), locked: isLocked(item.layer), \'mask-editing\': isMaskEditing(item.layer), \'lmp-drop-above\': dropId === item.layer.uuid && dropPos === \'before\', \'lmp-drop-below\': dropId === item.layer.uuid && dropPos === \'after\' }"\
 								draggable="true"\
 								@dragstart="startDragLayer($event, item.layer.uuid, null)"\
 								@dragover.prevent="dragOverLayer($event, item.layer.uuid)"\
@@ -2220,6 +2331,10 @@
 				};
 			},
 			computed: {
+				maskEditing: function () {
+					this.tick;
+					return maskEditMode.active;
+				},
 				hasTexture: function () {
 					this.tick;
 					return !!getSelectedTexture();
@@ -2394,6 +2509,18 @@
 							}
 						},
 						'_',
+						layerMasks[layer.uuid] ? {
+							name: maskEditMode.active && maskEditMode.layerUUID === layer.uuid ? 'Exit Mask Edit' : 'Edit Mask',
+							icon: 'brush',
+							click: function () {
+								if (maskEditMode.active && maskEditMode.layerUUID === layer.uuid) {
+									exitMaskEdit();
+								} else {
+									enterMaskEdit(layer, null);
+								}
+								self.tick++;
+							}
+						} : null,
 						layerMasks[layer.uuid] ? null : {
 							name: 'Add Mask',
 							icon: 'gradient',
@@ -2536,6 +2663,10 @@
 					createLayerGroup();
 				},
 				selectLayer: function (layer, event) {
+					// Exit mask edit mode when selecting a different layer
+					if (maskEditMode.active && layer.uuid !== maskEditMode.layerUUID) {
+						exitMaskEdit();
+					}
 					if (event && (event.ctrlKey || event.metaKey)) {
 						// Toggle multi-select
 						if (multiSelected.has(layer.uuid)) {
@@ -2608,7 +2739,12 @@
 					return m ? m.enabled : false;
 				},
 				toggleMask: function (layer) {
-					toggleLayerMaskEnabled(layer);
+					// Click on mask thumbnail → enter edit mode (or exit if already editing)
+					if (maskEditMode.active && maskEditMode.layerUUID === layer.uuid && !maskEditMode.groupName) {
+						exitMaskEdit();
+					} else {
+						enterMaskEdit(layer, null);
+					}
 					this.tick++;
 				},
 				getMaskPreview: function (layer) {
@@ -2624,7 +2760,24 @@
 					return m ? m.enabled : false;
 				},
 				toggleGrpMask: function (name) {
-					toggleGroupMaskEnabled(name);
+					// Click on group mask thumbnail → enter edit mode
+					if (maskEditMode.active && maskEditMode.groupName === name) {
+						exitMaskEdit();
+					} else {
+						var grp = _groups()[name];
+						if (grp && grp.length > 0) {
+							var layer = findLayerByUUID(grp[0]);
+							if (layer) enterMaskEdit(layer, name);
+						}
+					}
+					this.tick++;
+				},
+				isMaskEditing: function (layer) {
+					this.tick;
+					return maskEditMode.active && maskEditMode.layerUUID === layer.uuid;
+				},
+				exitMaskEditMode: function () {
+					exitMaskEdit();
 					this.tick++;
 				},
 				getGroupMaskPreview: function (name) {
@@ -2648,6 +2801,9 @@
 					this.tick++;
 				},
 				deleteLayer: function (layer) {
+					if (maskEditMode.active && maskEditMode.layerUUID === layer.uuid) {
+						exitMaskEdit();
+					}
 					if (isLayerLocked(layer)) {
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
@@ -3229,8 +3385,16 @@
 				.lmp-mask-btn { position: relative; opacity: 0.8; }\
 				.lmp-mask-btn:hover { opacity: 1; }\
 				.lmp-mask-btn.lmp-mask-disabled { opacity: 0.3; }\
-				.lmp-mask-thumb { width: 18px; height: 18px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.3); image-rendering: pixelated; display: block; }\
-				.lmp-mask-thumb-sm { width: 15px; height: 15px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.25); image-rendering: pixelated; display: block; }\
+				.lmp-mask-thumb { width: 18px; height: 18px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.3); image-rendering: pixelated; display: block; cursor: pointer; }\
+				.lmp-mask-thumb-sm { width: 15px; height: 15px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.25); image-rendering: pixelated; display: block; cursor: pointer; }\
+				\
+				/* Mask edit mode */\
+				.lmp-mask-edit-bar { display: flex; align-items: center; gap: 6px; padding: 6px 8px; background: #e65100; color: #fff; font-size: 11px; font-weight: 600; cursor: pointer; border-radius: 4px; margin-bottom: 4px; user-select: none; transition: background 0.15s; }\
+				.lmp-mask-edit-bar:hover { background: #bf360c; }\
+				.lmp-mask-edit-bar i { font-size: 16px; }\
+				.lmp-mask-edit-bar span { flex: 1; }\
+				.lmp-layer-item.mask-editing { border-color: #e65100 !important; background: color-mix(in srgb, #e65100 25%, var(--color-back)) !important; }\
+				.lmp-layer-item.mask-editing .lmp-mask-thumb { border-color: #e65100; box-shadow: 0 0 4px #e65100; }\
 				\
 				/* Drag & Drop */\
 				.lmp-drag-handle { font-size: 14px; opacity: 0.25; cursor: grab; flex-shrink: 0; transition: opacity 0.12s; }\
@@ -3333,6 +3497,8 @@
 			// Compile: inject LMP data into project JSON on save
 			codecCompileCb = function (e) {
 				if (e.model) {
+					// Exit mask edit mode before saving to ensure canvas is restored
+					if (maskEditMode.active) exitMaskEdit();
 					e.model.layer_manager_pro = serializeLmpData();
 				}
 			};
@@ -3359,6 +3525,7 @@
 
 			// Also listen for project close/switch to clear state
 			function onNewProject() {
+				if (maskEditMode.active) exitMaskEdit();
 				stopAllExternalEdits();
 				stopPsdEdit();
 				clearLmpData();
@@ -3369,17 +3536,17 @@
 
 			// Listen for texture/layer changes to keep panel updated
 			function onUpdate() { updatePanel(); }
-			var events = [
-				'select_texture',
-				'update_texture_selection',
-				'add_texture',
-				'finish_edit',
-				'undo',
-				'redo',
-				'select_mode',
-				'update_selection'
-			];
-			events.forEach(function (evt) {
+			function onTexSwitch() {
+				if (maskEditMode.active) exitMaskEdit();
+				updatePanel();
+			}
+			// Events that should exit mask edit mode (texture switch)
+			['select_texture', 'update_texture_selection'].forEach(function (evt) {
+				Blockbench.on(evt, onTexSwitch);
+				eventListeners.push({ event: evt, fn: onTexSwitch });
+			});
+			// Other events just update the panel
+			['add_texture', 'finish_edit', 'undo', 'redo', 'select_mode', 'update_selection'].forEach(function (evt) {
 				Blockbench.on(evt, onUpdate);
 				eventListeners.push({ event: evt, fn: onUpdate });
 			});
