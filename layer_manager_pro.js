@@ -1969,6 +1969,8 @@
 
 	function saveLmpToLocalStorage() {
 		if (_restoring) return; // Don't save during restore
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return; // No project/texture open
 		var key = _lmpStorageKey();
 		if (!key) return;
 		try {
@@ -2303,19 +2305,23 @@
 					}
 
 					// Auto-add layers not yet tracked in treeOrder
-					// Skip during restore to avoid polluting treeOrder before data is loaded
-					if (!_restoring) {
-						var untracked = [];
-						allLayers.forEach(function (l) {
-							if (!seenUUIDs.has(l.uuid) && !getLayerGroupName(l.uuid)) {
-								untracked.push(l);
-							}
-						});
-						// Prepend in correct visual order (reverse iterate + unshift)
-						for (var u = untracked.length - 1; u >= 0; u--) {
-							tree.unshift({ type: 'layer', layer: untracked[u] });
-							to.unshift(untracked[u].uuid);
+					// Skip layers that belong to a group (even if not resolved yet)
+					var allGroupedUUIDs = new Set();
+					var groups = _groups();
+					for (var gn in groups) {
+						groups[gn].forEach(function (uid) { allGroupedUUIDs.add(uid); });
+					}
+
+					var untracked = [];
+					allLayers.forEach(function (l) {
+						if (!seenUUIDs.has(l.uuid) && !allGroupedUUIDs.has(l.uuid)) {
+							untracked.push(l);
 						}
+					});
+					// Prepend in correct visual order (reverse iterate + unshift)
+					for (var u = untracked.length - 1; u >= 0; u--) {
+						tree.unshift({ type: 'layer', layer: untracked[u] });
+						to.unshift(untracked[u].uuid);
 					}
 
 					return tree;
@@ -3384,29 +3390,31 @@
 			}, 500);
 
 			// Restore LMP data from localStorage (handles plugin reload)
-			// Use multiple deferred attempts to wait for textures/layers to be ready
-			_restoring = true;
-			var _restoreAttempts = 0;
 			function _tryRestore() {
-				_restoreAttempts++;
 				var tex = getSelectedTexture();
-				if (tex && tex.layers_enabled && tex.layers.length > 0) {
-					if (restoreLmpFromLocalStorage()) {
-						console.log('LMP: Restored state from localStorage (attempt ' + _restoreAttempts + ')');
-						syncLayerOrder();
-					}
-					_restoring = false;
-					updatePanel();
-				} else if (_restoreAttempts < 20) {
-					// Layers not ready yet, retry
-					setTimeout(_tryRestore, 250);
-				} else {
-					_restoring = false;
-					updatePanel();
+				if (!tex || !tex.layers_enabled || tex.layers.length === 0) return;
+				_restoring = true;
+				if (restoreLmpFromLocalStorage()) {
+					console.log('LMP: Restored state from localStorage');
+					syncLayerOrder();
+				}
+				_restoring = false;
+				updatePanel();
+			}
+			// Try immediately if a project is already open
+			_tryRestore();
+			// Also try when a texture is selected/added (covers late load)
+			function _onTexReady() {
+				// Only restore if we have no data yet (first load)
+				var td = getTexData();
+				if (td.treeOrder.length === 0 && Object.keys(td.groups).length === 0) {
+					_tryRestore();
 				}
 			}
-			// Start immediately, then retry if needed
-			_tryRestore();
+			Blockbench.on('select_texture', _onTexReady);
+			eventListeners.push({ event: 'select_texture', fn: _onTexReady });
+			Blockbench.on('add_texture', _onTexReady);
+			eventListeners.push({ event: 'add_texture', fn: _onTexReady });
 		},
 
 		onunload: function () {
