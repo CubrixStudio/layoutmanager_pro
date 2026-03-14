@@ -129,6 +129,268 @@
 		updatePanel();
 	}
 
+	// ---- Mask system ----
+	// layerMasks[layerUUID] = { canvas, ctx, enabled, original: ImageData|null }
+	// groupMasks[groupName] = { canvas, ctx, enabled }
+	const layerMasks = {};
+	const groupMasks = {};
+
+	function getLayerMask(layerUUID) {
+		return layerMasks[layerUUID] || null;
+	}
+
+	function getGroupMask(groupName) {
+		return groupMasks[groupName] || null;
+	}
+
+	function createMaskCanvas(w, h) {
+		var c = document.createElement('canvas');
+		c.width = w; c.height = h;
+		var ctx = c.getContext('2d');
+		// Default: white = fully visible
+		ctx.fillStyle = '#ffffff';
+		ctx.fillRect(0, 0, w, h);
+		return { canvas: c, ctx: ctx };
+	}
+
+	function addLayerMask(layer) {
+		if (!layer || !layer.canvas) return;
+		if (layerMasks[layer.uuid]) return; // already has mask
+		var m = createMaskCanvas(layer.canvas.width, layer.canvas.height);
+		layerMasks[layer.uuid] = { canvas: m.canvas, ctx: m.ctx, enabled: true, original: null };
+		applyMaskToLayer(layer);
+		updatePanel();
+	}
+
+	function addLayerMaskBlack(layer) {
+		if (!layer || !layer.canvas) return;
+		// Remove existing mask first if any
+		if (layerMasks[layer.uuid]) {
+			restoreLayerFromMask(layer);
+			delete layerMasks[layer.uuid];
+		}
+		var w = layer.canvas.width, h = layer.canvas.height;
+		var c = document.createElement('canvas');
+		c.width = w; c.height = h;
+		var ctx = c.getContext('2d');
+		// Black = fully hidden
+		ctx.fillStyle = '#000000';
+		ctx.fillRect(0, 0, w, h);
+		layerMasks[layer.uuid] = { canvas: c, ctx: ctx, enabled: true, original: null };
+		applyMaskToLayer(layer);
+		updatePanel();
+	}
+
+	function invertMask(maskObj) {
+		if (!maskObj || !maskObj.canvas) return;
+		var w = maskObj.canvas.width, h = maskObj.canvas.height;
+		var imgData = maskObj.ctx.getImageData(0, 0, w, h);
+		var d = imgData.data;
+		for (var i = 0; i < d.length; i += 4) {
+			d[i] = 255 - d[i];
+			d[i + 1] = 255 - d[i + 1];
+			d[i + 2] = 255 - d[i + 2];
+			// Keep alpha at 255
+		}
+		maskObj.ctx.putImageData(imgData, 0, 0);
+	}
+
+	function removeLayerMask(layer, apply) {
+		if (!layer) return;
+		var mask = layerMasks[layer.uuid];
+		if (!mask) return;
+		if (apply) {
+			// "Apply mask" = bake mask into layer alpha permanently
+			bakeMaskIntoLayer(layer);
+		} else {
+			// "Delete mask" = remove mask and restore original alpha
+			restoreLayerFromMask(layer);
+		}
+		delete layerMasks[layer.uuid];
+		var tex = getSelectedTexture();
+		if (tex) tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function toggleLayerMaskEnabled(layer) {
+		var mask = layerMasks[layer.uuid];
+		if (!mask) return;
+		mask.enabled = !mask.enabled;
+		applyMaskToLayer(layer);
+		updatePanel();
+	}
+
+	function addGroupMask(groupName) {
+		if (groupMasks[groupName]) return;
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled || !tex.layers[0]) return;
+		var w = tex.layers[0].canvas.width;
+		var h = tex.layers[0].canvas.height;
+		var m = createMaskCanvas(w, h);
+		groupMasks[groupName] = { canvas: m.canvas, ctx: m.ctx, enabled: true };
+		// Apply mask to all layers in the group
+		var grp = _groups()[groupName];
+		if (grp) {
+			grp.forEach(function (uuid) {
+				var layer = findLayerByUUID(uuid);
+				if (layer) applyMaskToLayer(layer);
+			});
+		}
+		updatePanel();
+	}
+
+	function addGroupMaskBlack(groupName) {
+		if (groupMasks[groupName]) return;
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled || !tex.layers[0]) return;
+		var w = tex.layers[0].canvas.width;
+		var h = tex.layers[0].canvas.height;
+		var c = document.createElement('canvas');
+		c.width = w; c.height = h;
+		var ctx = c.getContext('2d');
+		ctx.fillStyle = '#000000';
+		ctx.fillRect(0, 0, w, h);
+		groupMasks[groupName] = { canvas: c, ctx: ctx, enabled: true };
+		var grp = _groups()[groupName];
+		if (grp) {
+			grp.forEach(function (uuid) {
+				var layer = findLayerByUUID(uuid);
+				if (layer) applyMaskToLayer(layer);
+			});
+		}
+		updatePanel();
+	}
+
+	function removeGroupMask(groupName, apply) {
+		var mask = groupMasks[groupName];
+		if (!mask) return;
+		var grp = _groups()[groupName];
+		if (grp) {
+			grp.forEach(function (uuid) {
+				var layer = findLayerByUUID(uuid);
+				if (layer) {
+					if (apply) {
+						bakeMaskIntoLayer(layer);
+					} else {
+						restoreLayerFromMask(layer);
+					}
+				}
+			});
+		}
+		delete groupMasks[groupName];
+		var tex = getSelectedTexture();
+		if (tex) tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function toggleGroupMaskEnabled(groupName) {
+		var mask = groupMasks[groupName];
+		if (!mask) return;
+		mask.enabled = !mask.enabled;
+		var grp = _groups()[groupName];
+		if (grp) {
+			grp.forEach(function (uuid) {
+				var layer = findLayerByUUID(uuid);
+				if (layer) applyMaskToLayer(layer);
+			});
+		}
+		var tex = getSelectedTexture();
+		if (tex) tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function findLayerByUUID(uuid) {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return null;
+		for (var i = 0; i < tex.layers.length; i++) {
+			if (tex.layers[i].uuid === uuid) return tex.layers[i];
+		}
+		return null;
+	}
+
+	// Snapshot the original pixels before applying mask (so we can restore later)
+	function snapshotMaskOriginal(layer) {
+		var mask = layerMasks[layer.uuid];
+		if (mask && !mask.original) {
+			// Use filter stack's original if available, else snapshot current
+			var filterStack = layerFilterStacks[layer.uuid];
+			if (filterStack && filterStack.original) {
+				mask.original = new ImageData(new Uint8ClampedArray(filterStack.original.data), layer.canvas.width, layer.canvas.height);
+			} else {
+				mask.original = layer.ctx.getImageData(0, 0, layer.canvas.width, layer.canvas.height);
+			}
+		}
+	}
+
+	function applyMaskToLayer(layer) {
+		if (!layer || !layer.canvas) return;
+		var mask = layerMasks[layer.uuid];
+		var groupName = getLayerGroupName(layer.uuid);
+		var gMask = groupName ? groupMasks[groupName] : null;
+
+		if (!mask && !gMask) return;
+
+		if (mask) snapshotMaskOriginal(layer);
+
+		// If filters exist, recomputeFilters already applies masks at the end
+		var filterStack = layerFilterStacks[layer.uuid];
+		if (filterStack && filterStack.original && filterStack.filters.length > 0) {
+			recomputeFilters(layer);
+			return;
+		}
+
+		// No filters: apply mask directly on current pixels
+		var w = layer.canvas.width, h = layer.canvas.height;
+		// Restore from mask original if available
+		if (mask && mask.original) {
+			layer.ctx.putImageData(mask.original, 0, 0);
+		}
+		var imgData = layer.ctx.getImageData(0, 0, w, h);
+		applyMaskToImageData(layer.uuid, imgData);
+		layer.ctx.putImageData(imgData, 0, 0);
+		var tex = getSelectedTexture();
+		if (tex) tex.updateLayerChanges(true);
+	}
+
+	function bakeMaskIntoLayer(layer) {
+		// Already applied visually, just discard original
+		var mask = layerMasks[layer.uuid];
+		if (mask) mask.original = null;
+	}
+
+	function restoreLayerFromMask(layer) {
+		var mask = layerMasks[layer.uuid];
+		if (mask && mask.original) {
+			layer.ctx.putImageData(mask.original, 0, 0);
+			mask.original = null;
+			// Re-run filters
+			var filterStack = layerFilterStacks[layer.uuid];
+			if (filterStack && filterStack.original && filterStack.filters.length > 0) {
+				recomputeFilters(layer);
+			}
+		}
+	}
+
+	function getMaskPreviewDataURL(maskObj) {
+		if (!maskObj || !maskObj.canvas) return '';
+		try {
+			var size = 22;
+			var tmp = document.createElement('canvas');
+			tmp.width = size; tmp.height = size;
+			var tctx = tmp.getContext('2d');
+			tctx.fillStyle = '#000';
+			tctx.fillRect(0, 0, size, size);
+			var sw = maskObj.canvas.width, sh = maskObj.canvas.height;
+			if (sw > 0 && sh > 0) {
+				var scale = Math.min(size / sw, size / sh);
+				var dw = sw * scale, dh = sh * scale;
+				var dx = (size - dw) / 2, dy = (size - dh) / 2;
+				tctx.drawImage(maskObj.canvas, 0, 0, sw, sh, dx, dy, dw, dh);
+			}
+			return tmp.toDataURL('image/png');
+		} catch (e) { return ''; }
+	}
+
 	// Non-destructive filter system
 	// layerFilterStacks[layerUUID] = { original: ImageData|null, filters: [{ id, name, enabled, intensity }] }
 	const layerFilterStacks = {};
@@ -184,8 +446,44 @@
 			}
 		});
 
+		// Apply masks after filters
+		applyMaskToImageData(layer.uuid, working);
+
 		layer.ctx.putImageData(working, 0, 0);
 		if (tex) tex.updateLayerChanges(true);
+	}
+
+	// Apply layer and group masks to an ImageData in-place
+	function applyMaskToImageData(layerUUID, imgData) {
+		var mask = layerMasks[layerUUID];
+		var groupName = getLayerGroupName(layerUUID);
+		var gMask = groupName ? groupMasks[groupName] : null;
+		if (!mask && !gMask) return;
+
+		var w = imgData.width, h = imgData.height;
+		var pixels = imgData.data;
+
+		var layerMaskPixels = null;
+		if (mask && mask.enabled) {
+			var mData = mask.ctx.getImageData(0, 0, mask.canvas.width, mask.canvas.height);
+			layerMaskPixels = mData.data;
+		}
+		var groupMaskPixels = null;
+		if (gMask && gMask.enabled) {
+			var gData = gMask.ctx.getImageData(0, 0, gMask.canvas.width, gMask.canvas.height);
+			groupMaskPixels = gData.data;
+		}
+
+		for (var i = 0; i < pixels.length; i += 4) {
+			var maskAlpha = 1;
+			if (layerMaskPixels) {
+				maskAlpha *= (layerMaskPixels[i] * 0.299 + layerMaskPixels[i + 1] * 0.587 + layerMaskPixels[i + 2] * 0.114) / 255;
+			}
+			if (groupMaskPixels) {
+				maskAlpha *= (groupMaskPixels[i] * 0.299 + groupMaskPixels[i + 1] * 0.587 + groupMaskPixels[i + 2] * 0.114) / 255;
+			}
+			pixels[i + 3] = Math.round(pixels[i + 3] * maskAlpha);
+		}
 	}
 
 	function addFilterToStack(layer, filterName) {
@@ -1494,12 +1792,40 @@
 				}
 				return out;
 			})(),
+			masks: (function () {
+				var out = {};
+				for (var uuid in layerMasks) {
+					var m = layerMasks[uuid];
+					if (m && m.canvas) {
+						out[uuid] = {
+							data: m.canvas.toDataURL('image/png'),
+							enabled: m.enabled,
+						};
+					}
+				}
+				return out;
+			})(),
+			groupMasks: (function () {
+				var out = {};
+				for (var name in groupMasks) {
+					var m = groupMasks[name];
+					if (m && m.canvas) {
+						out[name] = {
+							data: m.canvas.toDataURL('image/png'),
+							enabled: m.enabled,
+						};
+					}
+				}
+				return out;
+			})(),
 		};
 	}
 
 	function clearLmpData() {
 		for (var key in perTextureData) delete perTextureData[key];
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
+		for (var key in layerMasks) delete layerMasks[key];
+		for (var key in groupMasks) delete groupMasks[key];
 		filterIdCounter = 0;
 	}
 
@@ -1559,6 +1885,58 @@
 				});
 			}
 		}
+
+		// Restore layer masks
+		if (data.masks) {
+			for (var uuid in data.masks) {
+				(function (uid, mData) {
+					var img = new Image();
+					img.onload = function () {
+						var c = document.createElement('canvas');
+						c.width = img.width; c.height = img.height;
+						var ctx = c.getContext('2d');
+						ctx.drawImage(img, 0, 0);
+						layerMasks[uid] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false, original: null };
+						// Re-apply mask after load
+						var layer = findLayerByUUID(uid);
+						if (layer) {
+							setTimeout(function () { applyMaskToLayer(layer); }, 300);
+						}
+						updatePanel();
+					};
+					img.src = mData.data;
+				})(uuid, data.masks[uuid]);
+			}
+		}
+
+		// Restore group masks
+		if (data.groupMasks) {
+			for (var name in data.groupMasks) {
+				(function (gName, mData) {
+					var img = new Image();
+					img.onload = function () {
+						var c = document.createElement('canvas');
+						c.width = img.width; c.height = img.height;
+						var ctx = c.getContext('2d');
+						ctx.drawImage(img, 0, 0);
+						groupMasks[gName] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false };
+						// Re-apply to layers in this group
+						var grp = _groups()[gName];
+						if (grp) {
+							grp.forEach(function (uuid) {
+								var layer = findLayerByUUID(uuid);
+								if (layer) {
+									setTimeout(function () { applyMaskToLayer(layer); }, 400);
+								}
+							});
+						}
+						updatePanel();
+					};
+					img.src = mData.data;
+				})(name, data.groupMasks[name]);
+			}
+		}
+
 		// Defer sync to allow textures to finish loading
 		setTimeout(function () { syncLayerOrder(); }, 250);
 		updatePanel();
@@ -1699,6 +2077,7 @@
 								<div class="lmp-group-header"\
 									draggable="true"\
 									@click="toggleCollapse(item.name)"\
+									@contextmenu.prevent.stop="showGroupContextMenu($event, item.name)"\
 									@dragstart.stop="startDragGroup($event, item.name)"\
 									@dragover.prevent.stop="dragOverGroup($event, item.name)"\
 									@dragleave="onDragLeave($event)"\
@@ -1715,6 +2094,9 @@
 									</button>\
 									<button @click.stop="toggleGroupLock(item.name)" :title="item.allLocked ? \'Unlock group\' : \'Lock group\'" class="lmp-grp-btn">\
 										<i class="material-icons">{{ item.allLocked ? "lock" : "lock_open" }}</i>\
+									</button>\
+									<button v-if="hasGroupMask(item.name)" class="lmp-grp-btn lmp-mask-btn" :class="{ \'lmp-mask-disabled\': !isGroupMaskEnabled(item.name) }" @click.stop="toggleGrpMask(item.name)" title="Toggle group mask">\
+										<img class="lmp-mask-thumb-sm" :src="getGroupMaskPreview(item.name)" />\
 									</button>\
 									<button @click.stop="deleteGroup(item.name)" title="Delete group" class="lmp-grp-btn">\
 										<i class="material-icons">close</i>\
@@ -1742,6 +2124,9 @@
 										<span class="lmp-layer-name" @dblclick.stop="renameLayer(layer)">{{ layer.name }}</span>\
 										<button class="lmp-btn" @click.stop="toggleLock(layer)" :title="isLocked(layer) ? \'Unlock\' : \'Lock\'">\
 											<i class="material-icons">{{ isLocked(layer) ? "lock" : "lock_open" }}</i>\
+										</button>\
+										<button v-if="hasMask(layer)" class="lmp-btn lmp-mask-btn" :class="{ \'lmp-mask-disabled\': !isMaskEnabled(layer) }" @click.stop="toggleMask(layer)" title="Toggle mask">\
+											<img class="lmp-mask-thumb" :src="getMaskPreview(layer)" />\
 										</button>\
 										<button class="lmp-btn" @click.stop="removeFromGroup(item.name, layer.uuid)" title="Remove from group">\
 											<i class="material-icons">logout</i>\
@@ -1773,6 +2158,9 @@
 								<span class="lmp-layer-name" @dblclick.stop="renameLayer(item.layer)">{{ item.layer.name }}</span>\
 								<button class="lmp-btn" @click.stop="toggleLock(item.layer)" :title="isLocked(item.layer) ? \'Unlock\' : \'Lock\'">\
 									<i class="material-icons">{{ isLocked(item.layer) ? "lock" : "lock_open" }}</i>\
+								</button>\
+								<button v-if="hasMask(item.layer)" class="lmp-btn lmp-mask-btn" :class="{ \'lmp-mask-disabled\': !isMaskEnabled(item.layer) }" @click.stop="toggleMask(item.layer)" title="Toggle mask">\
+									<img class="lmp-mask-thumb" :src="getMaskPreview(item.layer)" />\
 								</button>\
 								<button class="lmp-btn lmp-btn-danger" @click.stop="deleteLayer(item.layer)" title="Delete">\
 									<i class="material-icons">delete</i>\
@@ -1995,6 +2383,56 @@
 							}
 						},
 						'_',
+						layerMasks[layer.uuid] ? null : {
+							name: 'Add Mask',
+							icon: 'gradient',
+							click: function () {
+								addLayerMask(layer);
+								self.tick++;
+							}
+						},
+						layerMasks[layer.uuid] ? {
+							name: 'Add Mask from Black',
+							icon: 'gradient',
+							click: function () {
+								addLayerMaskBlack(layer);
+								self.tick++;
+							}
+						} : null,
+						layerMasks[layer.uuid] ? {
+							name: layerMasks[layer.uuid].enabled ? 'Disable Mask' : 'Enable Mask',
+							icon: layerMasks[layer.uuid].enabled ? 'visibility_off' : 'visibility',
+							click: function () {
+								toggleLayerMaskEnabled(layer);
+								self.tick++;
+							}
+						} : null,
+						layerMasks[layer.uuid] ? {
+							name: 'Apply Mask',
+							icon: 'check_circle',
+							click: function () {
+								removeLayerMask(layer, true);
+								self.tick++;
+							}
+						} : null,
+						layerMasks[layer.uuid] ? {
+							name: 'Delete Mask',
+							icon: 'delete_forever',
+							click: function () {
+								removeLayerMask(layer, false);
+								self.tick++;
+							}
+						} : null,
+						layerMasks[layer.uuid] ? {
+							name: 'Invert Mask',
+							icon: 'invert_colors',
+							click: function () {
+								invertMask(layerMasks[layer.uuid]);
+								applyMaskToLayer(layer);
+								self.tick++;
+							}
+						} : null,
+						'_',
 						{
 							name: 'Delete',
 							icon: 'delete',
@@ -2150,6 +2588,38 @@
 				isLocked: function (layer) {
 					return isLayerLocked(layer);
 				},
+				hasMask: function (layer) {
+					this.tick; // reactivity
+					return !!layerMasks[layer.uuid];
+				},
+				isMaskEnabled: function (layer) {
+					var m = layerMasks[layer.uuid];
+					return m ? m.enabled : false;
+				},
+				toggleMask: function (layer) {
+					toggleLayerMaskEnabled(layer);
+					this.tick++;
+				},
+				getMaskPreview: function (layer) {
+					this.tick;
+					return getMaskPreviewDataURL(layerMasks[layer.uuid]);
+				},
+				hasGroupMask: function (name) {
+					this.tick;
+					return !!groupMasks[name];
+				},
+				isGroupMaskEnabled: function (name) {
+					var m = groupMasks[name];
+					return m ? m.enabled : false;
+				},
+				toggleGrpMask: function (name) {
+					toggleGroupMaskEnabled(name);
+					this.tick++;
+				},
+				getGroupMaskPreview: function (name) {
+					this.tick;
+					return getMaskPreviewDataURL(groupMasks[name]);
+				},
 				isCollapsed: function (groupName) {
 					return !!this.collapsed[groupName];
 				},
@@ -2196,6 +2666,11 @@
 						if (value && value !== oldName && !_groups()[value]) {
 							_groups()[value] = _groups()[oldName];
 							delete _groups()[oldName];
+							// Move group mask to new name
+							if (groupMasks[oldName]) {
+								groupMasks[value] = groupMasks[oldName];
+								delete groupMasks[oldName];
+							}
 							var oi = _treeOrder().indexOf('group:' + oldName);
 							if (oi !== -1) _treeOrder()[oi] = 'group:' + value;
 							updatePanel();
@@ -2244,7 +2719,85 @@
 				},
 				deleteGroup: function (groupName) {
 					deleteLayerGroup(groupName);
+					if (groupMasks[groupName]) delete groupMasks[groupName];
 					this.tick++;
+				},
+				showGroupContextMenu: function (event, groupName) {
+					var self = this;
+					var hasMask = !!groupMasks[groupName];
+					var items = [
+						{
+							name: 'Rename',
+							icon: 'edit',
+							click: function () { self.renameGroup(groupName); }
+						},
+						'_',
+						!hasMask ? {
+							name: 'Add Group Mask (White)',
+							icon: 'gradient',
+							click: function () {
+								addGroupMask(groupName);
+								self.tick++;
+							}
+						} : null,
+						!hasMask ? {
+							name: 'Add Group Mask (Black)',
+							icon: 'gradient',
+							click: function () {
+								addGroupMaskBlack(groupName);
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: groupMasks[groupName].enabled ? 'Disable Group Mask' : 'Enable Group Mask',
+							icon: groupMasks[groupName].enabled ? 'visibility_off' : 'visibility',
+							click: function () {
+								toggleGroupMaskEnabled(groupName);
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: 'Invert Group Mask',
+							icon: 'invert_colors',
+							click: function () {
+								invertMask(groupMasks[groupName]);
+								var grp = _groups()[groupName];
+								if (grp) {
+									grp.forEach(function (uuid) {
+										var layer = findLayerByUUID(uuid);
+										if (layer) applyMaskToLayer(layer);
+									});
+								}
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: 'Apply Group Mask',
+							icon: 'check_circle',
+							click: function () {
+								removeGroupMask(groupName, true);
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: 'Delete Group Mask',
+							icon: 'delete_forever',
+							click: function () {
+								removeGroupMask(groupName, false);
+								self.tick++;
+							}
+						} : null,
+						'_',
+						{
+							name: 'Delete Group',
+							icon: 'delete',
+							click: function () {
+								self.deleteGroup(groupName);
+							}
+						}
+					].filter(function (i) { return i !== null; });
+					var menu = new Menu(items);
+					menu.open(event);
 				},
 				removeFromGroup: function (groupName, uuid) {
 					removeLayerFromGroup(groupName, uuid);
@@ -2660,6 +3213,13 @@
 				.lmp-filter-name { flex: 0 0 auto; font-size: 11px; min-width: 70px; white-space: nowrap; }\
 				.lmp-filter-intensity { flex: 1; height: 12px; min-width: 40px; cursor: pointer; }\
 				.lmp-filter-pct { font-size: 10px; min-width: 28px; text-align: right; opacity: 0.6; }\
+				\
+				/* Masks */\
+				.lmp-mask-btn { position: relative; opacity: 0.8; }\
+				.lmp-mask-btn:hover { opacity: 1; }\
+				.lmp-mask-btn.lmp-mask-disabled { opacity: 0.3; }\
+				.lmp-mask-thumb { width: 18px; height: 18px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.3); image-rendering: pixelated; display: block; }\
+				.lmp-mask-thumb-sm { width: 15px; height: 15px; border-radius: 2px; border: 1px solid rgba(255,255,255,0.25); image-rendering: pixelated; display: block; }\
 				\
 				/* Drag & Drop */\
 				.lmp-drag-handle { font-size: 14px; opacity: 0.25; cursor: grab; flex-shrink: 0; transition: opacity 0.12s; }\
