@@ -324,6 +324,16 @@
 		return null;
 	}
 
+	function findFirstValidLayerInGroup(groupName) {
+		var grp = _groups()[groupName];
+		if (!grp) return null;
+		for (var i = 0; i < grp.length; i++) {
+			var layer = findLayerByUUID(grp[i]);
+			if (layer && layer.canvas) return layer;
+		}
+		return null;
+	}
+
 	// Snapshot the original pixels before applying mask (so we can restore later)
 	function snapshotMaskOriginal(layer) {
 		var mask = layerMasks[layer.uuid];
@@ -390,10 +400,7 @@
 	// ---- Mask Editing Mode ----
 
 	function enterMaskEdit(layer, groupName) {
-		if (!layer || !layer.canvas) {
-			console.warn('LMP enterMaskEdit: no layer or no layer.canvas', layer, groupName);
-			return;
-		}
+		if (!layer || !layer.canvas) return;
 		// Exit current mask edit if active
 		if (maskEditMode.active) exitMaskEdit();
 
@@ -403,11 +410,7 @@
 		} else {
 			mask = layerMasks[layer.uuid];
 		}
-		if (!mask || !mask.canvas) {
-			console.warn('LMP enterMaskEdit: no mask or no mask.canvas', groupName, mask);
-			return;
-		}
-		console.log('LMP enterMaskEdit: OK, entering mask edit for', groupName || layer.uuid);
+		if (!mask || !mask.canvas) return;
 
 		// Ensure mask canvas matches layer dimensions
 		if (mask.canvas.width !== layer.canvas.width || mask.canvas.height !== layer.canvas.height) {
@@ -2843,11 +2846,8 @@
 					if (maskEditMode.active && maskEditMode.groupName === name) {
 						exitMaskEdit();
 					} else {
-						var grp = _groups()[name];
-						if (grp && grp.length > 0) {
-							var layer = findLayerByUUID(grp[0]);
-							if (layer) enterMaskEdit(layer, name);
-						}
+						var layer = findFirstValidLayerInGroup(name);
+						if (layer) enterMaskEdit(layer, name);
 					}
 					this.tick++;
 				},
@@ -3002,19 +3002,11 @@
 							name: maskEditMode.active && maskEditMode.groupName === groupName ? 'Exit Mask Edit' : 'Edit Group Mask',
 							icon: 'brush',
 							click: function () {
-								console.log('LMP Edit Group Mask clicked, groupName:', groupName);
 								if (maskEditMode.active && maskEditMode.groupName === groupName) {
 									exitMaskEdit();
 								} else {
-									var grp = _groups()[groupName];
-									console.log('LMP grp:', grp);
-									if (grp && grp.length > 0) {
-										var layer = findLayerByUUID(grp[0]);
-										console.log('LMP layer found:', !!layer, layer ? layer.uuid : 'null');
-										if (layer) enterMaskEdit(layer, groupName);
-									} else {
-										console.warn('LMP: group empty or not found');
-									}
+									var layer = findFirstValidLayerInGroup(groupName);
+									if (layer) enterMaskEdit(layer, groupName);
 								}
 								self.tick++;
 							}
