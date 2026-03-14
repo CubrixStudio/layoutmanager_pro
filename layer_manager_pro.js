@@ -13,6 +13,7 @@
 	const eventListeners = [];
 	let codecCompileCb = null;
 	let codecParseCb = null;
+	let _restoring = false; // true during restore to prevent untracked auto-add
 
 	// Per-texture data: groups, tree order, and locks (independent per texture)
 	// treeOrder entries: 'group:Name' for groups, 'uuid' for ungrouped layers
@@ -1967,6 +1968,7 @@
 	}
 
 	function saveLmpToLocalStorage() {
+		if (_restoring) return; // Don't save during restore
 		var key = _lmpStorageKey();
 		if (!key) return;
 		try {
@@ -2301,16 +2303,19 @@
 					}
 
 					// Auto-add layers not yet tracked in treeOrder
-					var untracked = [];
-					allLayers.forEach(function (l) {
-						if (!seenUUIDs.has(l.uuid) && !getLayerGroupName(l.uuid)) {
-							untracked.push(l);
+					// Skip during restore to avoid polluting treeOrder before data is loaded
+					if (!_restoring) {
+						var untracked = [];
+						allLayers.forEach(function (l) {
+							if (!seenUUIDs.has(l.uuid) && !getLayerGroupName(l.uuid)) {
+								untracked.push(l);
+							}
+						});
+						// Prepend in correct visual order (reverse iterate + unshift)
+						for (var u = untracked.length - 1; u >= 0; u--) {
+							tree.unshift({ type: 'layer', layer: untracked[u] });
+							to.unshift(untracked[u].uuid);
 						}
-					});
-					// Prepend in correct visual order (reverse iterate + unshift)
-					for (var u = untracked.length - 1; u >= 0; u--) {
-						tree.unshift({ type: 'layer', layer: untracked[u] });
-						to.unshift(untracked[u].uuid);
 					}
 
 					return tree;
@@ -3379,10 +3384,29 @@
 			}, 500);
 
 			// Restore LMP data from localStorage (handles plugin reload)
-			if (restoreLmpFromLocalStorage()) {
-				console.log('LMP: Restored state from localStorage');
-				updatePanel();
+			// Use multiple deferred attempts to wait for textures/layers to be ready
+			_restoring = true;
+			var _restoreAttempts = 0;
+			function _tryRestore() {
+				_restoreAttempts++;
+				var tex = getSelectedTexture();
+				if (tex && tex.layers_enabled && tex.layers.length > 0) {
+					if (restoreLmpFromLocalStorage()) {
+						console.log('LMP: Restored state from localStorage (attempt ' + _restoreAttempts + ')');
+						syncLayerOrder();
+					}
+					_restoring = false;
+					updatePanel();
+				} else if (_restoreAttempts < 20) {
+					// Layers not ready yet, retry
+					setTimeout(_tryRestore, 250);
+				} else {
+					_restoring = false;
+					updatePanel();
+				}
 			}
+			// Start immediately, then retry if needed
+			_tryRestore();
 		},
 
 		onunload: function () {
