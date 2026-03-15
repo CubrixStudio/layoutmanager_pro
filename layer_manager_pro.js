@@ -668,6 +668,102 @@
 		return Texture.selected || Texture.all[0];
 	}
 
+	// Validate and clean up stale UUIDs in treeOrder and groups
+	// Removes references to layers that no longer exist in the texture
+	// Also attempts to re-map UUIDs by matching layer names when possible
+	function cleanupStaleRefs(tex) {
+		if (!tex || !tex.layers_enabled) return;
+		var td = getTexData(tex.uuid);
+		var validUUIDs = new Set();
+		var layersByName = {};
+		tex.layers.forEach(function (l) {
+			validUUIDs.add(l.uuid);
+			// Build name→uuid map for re-mapping (use first match per name)
+			var n = l.name || '';
+			if (!layersByName[n]) layersByName[n] = [];
+			layersByName[n].push(l.uuid);
+		});
+
+		// Collect all UUIDs currently referenced (to know which valid UUIDs are "claimed")
+		var claimedUUIDs = new Set();
+		td.treeOrder.forEach(function (e) {
+			if (e.indexOf('group:') !== 0 && validUUIDs.has(e)) claimedUUIDs.add(e);
+		});
+		for (var gn in td.groups) {
+			td.groups[gn].forEach(function (uid) {
+				if (validUUIDs.has(uid)) claimedUUIDs.add(uid);
+			});
+		}
+
+		// Build a map of stale UUID → layer name (from previous save, if we stored it)
+		// We don't have names stored, so we rely on positional matching within groups
+		// For groups: try to remap stale member UUIDs to unclaimed valid UUIDs
+		var changed = false;
+		for (var gn in td.groups) {
+			var members = td.groups[gn];
+			for (var i = members.length - 1; i >= 0; i--) {
+				if (!validUUIDs.has(members[i])) {
+					// Stale UUID - remove it
+					members.splice(i, 1);
+					changed = true;
+				}
+			}
+			// Remove empty groups
+			if (members.length === 0) {
+				delete td.groups[gn];
+				var gi = td.treeOrder.indexOf('group:' + gn);
+				if (gi !== -1) td.treeOrder.splice(gi, 1);
+				changed = true;
+			}
+		}
+
+		// Clean up stale layer UUIDs from treeOrder
+		for (var i = td.treeOrder.length - 1; i >= 0; i--) {
+			var entry = td.treeOrder[i];
+			if (entry.indexOf('group:') === 0) {
+				// Check group still exists
+				var gname = entry.slice(6);
+				if (!td.groups[gname]) {
+					td.treeOrder.splice(i, 1);
+					changed = true;
+				}
+			} else if (!validUUIDs.has(entry)) {
+				// Stale layer UUID
+				td.treeOrder.splice(i, 1);
+				changed = true;
+			}
+		}
+
+		// Remove duplicate entries in treeOrder
+		var seen = new Set();
+		for (var i = td.treeOrder.length - 1; i >= 0; i--) {
+			if (seen.has(td.treeOrder[i])) {
+				td.treeOrder.splice(i, 1);
+				changed = true;
+			} else {
+				seen.add(td.treeOrder[i]);
+			}
+		}
+
+		// Ensure all ungrouped layers are in treeOrder
+		var allGroupedUUIDs = new Set();
+		for (var gn in td.groups) {
+			td.groups[gn].forEach(function (uid) { allGroupedUUIDs.add(uid); });
+		}
+		var treeSet = new Set(td.treeOrder);
+		tex.layers.forEach(function (l) {
+			if (!treeSet.has(l.uuid) && !allGroupedUUIDs.has(l.uuid)) {
+				td.treeOrder.push(l.uuid);
+				changed = true;
+			}
+		});
+
+		if (changed) {
+			console.log('LMP: Cleaned up stale references for texture ' + tex.uuid);
+		}
+		return changed;
+	}
+
 	// Sync tex.layers order to match treeOrder display
 	// treeOrder is top-to-bottom (visual), tex.layers is bottom-to-top (render)
 	function syncLayerOrder() {
@@ -2106,8 +2202,15 @@
 			}
 		}
 
-		// Defer sync to allow textures to finish loading
-		setTimeout(function () { syncLayerOrder(); }, 250);
+		// Defer cleanup + sync to allow textures to finish loading
+		setTimeout(function () {
+			// Clean up stale references for all loaded textures
+			for (var texUUID in perTextureData) {
+				var tex = Texture.all.find(function (t) { return t.uuid === texUUID; });
+				if (tex) cleanupStaleRefs(tex);
+			}
+			syncLayerOrder();
+		}, 250);
 		updatePanel();
 	}
 
@@ -2496,10 +2599,13 @@
 							untracked.push(l);
 						}
 					});
-					// Prepend in correct visual order (reverse iterate + unshift)
-					for (var u = untracked.length - 1; u >= 0; u--) {
-						tree.unshift({ type: 'layer', layer: untracked[u] });
-						to.unshift(untracked[u].uuid);
+					if (untracked.length > 0) {
+						// Add untracked layers to treeOrder AFTER the last existing entry
+						// to preserve group positions (append instead of prepend)
+						for (var u = 0; u < untracked.length; u++) {
+							tree.push({ type: 'layer', layer: untracked[u] });
+							to.push(untracked[u].uuid);
+						}
 					}
 
 					return tree;
@@ -3561,8 +3667,15 @@
 			codecParseCb = function (e) {
 				if (e.model && e.model.layer_manager_pro) {
 					deserializeLmpData(e.model.layer_manager_pro);
-					// Defer filter reapplication until textures are fully loaded
-					setTimeout(reapplyAllFilterStacks, 200);
+					// Defer cleanup + filter reapplication until textures are fully loaded
+					setTimeout(function () {
+						for (var texUUID in perTextureData) {
+							var tex = Texture.all.find(function (t) { return t.uuid === texUUID; });
+							if (tex) cleanupStaleRefs(tex);
+						}
+						syncLayerOrder();
+						reapplyAllFilterStacks();
+					}, 300);
 				} else {
 					clearLmpData();
 				}
@@ -3595,13 +3708,27 @@
 				if (maskEditMode.active) exitMaskEdit();
 				updatePanel();
 			}
+			// On undo/redo: clean up stale refs since layer UUIDs may have changed
+			function onUndoRedo() {
+				var tex = getSelectedTexture();
+				if (tex && tex.layers_enabled) {
+					cleanupStaleRefs(tex);
+					syncLayerOrder();
+				}
+				updatePanel();
+			}
 			// Events that should exit mask edit mode (texture switch)
 			['select_texture', 'update_texture_selection'].forEach(function (evt) {
 				Blockbench.on(evt, onTexSwitch);
 				eventListeners.push({ event: evt, fn: onTexSwitch });
 			});
+			// Undo/redo need special handling to fix stale group references
+			['undo', 'redo'].forEach(function (evt) {
+				Blockbench.on(evt, onUndoRedo);
+				eventListeners.push({ event: evt, fn: onUndoRedo });
+			});
 			// Other events just update the panel
-			['add_texture', 'finish_edit', 'undo', 'redo', 'select_mode', 'update_selection'].forEach(function (evt) {
+			['add_texture', 'finish_edit', 'select_mode', 'update_selection'].forEach(function (evt) {
 				Blockbench.on(evt, onUpdate);
 				eventListeners.push({ event: evt, fn: onUpdate });
 			});
