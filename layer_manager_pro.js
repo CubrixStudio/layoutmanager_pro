@@ -1329,8 +1329,8 @@
 				wi16(-1); wu32(2); wi16(0); wu32(2); wi16(1); wu32(2); wi16(2); wu32(2); // minimal channel data (compression only)
 				wstr('8BIM'); wstr(d.lsct === 3 ? 'norm' : 'pass'); // pass-through for folder
 				w8(d.op); w8(0); w8(0); w8(0);
-				// Extra data: mask(4) + blending(4) + name(npl) + lsct(8+12)
-				var lsctLen = 8 + 12; // '8BIM' + 'lsct' + length(4) + type(4) + '8BIM' + 'pass'/'norm'
+				// Extra data: mask(4) + blending(4) + name(npl) + lsct block(24)
+				var lsctLen = 8 + 4 + 12; // '8BIM'(4) + 'lsct'(4) + length_field(4) + data(12: type+sig+blend)
 				wu32(4 + 4 + d.npl + lsctLen);
 				wu32(0); wu32(0); // mask + blending ranges
 				w8(d.nb.length); wbuf(d.nb);
