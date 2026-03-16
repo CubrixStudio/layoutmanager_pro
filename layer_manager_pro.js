@@ -17,16 +17,16 @@
 
 	// Per-texture data: groups, tree order, and locks (independent per texture)
 	// treeOrder entries: 'group:Name' for groups, 'uuid' for ungrouped layers
-	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set } }
+	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set, groupOpacities: {} } }
 
 	function getTexData(texUUID) {
 		if (!texUUID) {
 			var tex = getSelectedTexture();
-			if (!tex) return { groups: {}, treeOrder: [], locks: new Set() };
+			if (!tex) return { groups: {}, treeOrder: [], locks: new Set(), groupOpacities: {} };
 			texUUID = tex.uuid;
 		}
 		if (!perTextureData[texUUID]) {
-			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set() };
+			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set(), groupOpacities: {} };
 		}
 		return perTextureData[texUUID];
 	}
@@ -890,6 +890,8 @@
 		var gi = _treeOrder().indexOf('group:' + groupName);
 		var members = (_groups()[groupName] || []).slice();
 		delete _groups()[groupName];
+		var td = getTexData();
+		delete td.groupOpacities[groupName];
 		if (gi !== -1) {
 			_treeOrder().splice(gi, 1);
 			// Insert members where the group was
@@ -913,6 +915,31 @@
 		const newState = !layers[0].visible;
 		layers.forEach(function (l) {
 			l.visible = newState;
+		});
+		tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
+	function getGroupOpacity(groupName) {
+		var td = getTexData();
+		return td.groupOpacities[groupName] != null ? td.groupOpacities[groupName] : 100;
+	}
+
+	function setGroupOpacity(groupName, opacity) {
+		var td = getTexData();
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return;
+		var prev = td.groupOpacities[groupName] != null ? td.groupOpacities[groupName] : 100;
+		td.groupOpacities[groupName] = opacity;
+		var members = _groups()[groupName] || [];
+		members.forEach(function (uuid) {
+			var layer = findLayerByUUID(uuid);
+			if (layer) {
+				// Scale layer opacity proportionally: if group was at 80 and layer at 40,
+				// base ratio is 40/80 = 0.5. New group opacity 60 → layer = 60 * 0.5 = 30
+				var base = prev > 0 ? (layer.opacity / prev) : (1 / members.length);
+				layer.opacity = Math.round(Math.min(100, Math.max(0, base * opacity)));
+			}
 		});
 		tex.updateLayerChanges(true);
 		updatePanel();
@@ -2048,6 +2075,7 @@
 					groups: JSON.parse(JSON.stringify(td.groups)),
 					treeOrder: td.treeOrder.slice(),
 					locks: Array.from(td.locks),
+					groupOpacities: JSON.parse(JSON.stringify(td.groupOpacities || {})),
 				};
 			}
 		}
@@ -2125,6 +2153,11 @@
 		}
 		if (src.locks && Array.isArray(src.locks)) {
 			src.locks.forEach(function (uuid) { td.locks.add(uuid); });
+		}
+		if (src.groupOpacities) {
+			for (var name in src.groupOpacities) {
+				td.groupOpacities[name] = src.groupOpacities[name];
+			}
 		}
 	}
 
@@ -2390,6 +2423,11 @@
 									<button @click.stop="deleteGroup(item.name)" title="Delete group" class="lmp-grp-btn">\
 										<i class="material-icons">close</i>\
 									</button>\
+								</div>\
+								<div v-if="!isCollapsed(item.name)" class="lmp-group-opacity">\
+									<label>Opacity</label>\
+									<input type="range" min="0" max="100" step="1" :value="getGroupOpacity(item.name)" @input="setGroupOpacity(item.name, $event)" />\
+									<span>{{ getGroupOpacity(item.name) }}%</span>\
 								</div>\
 								<div v-if="!isCollapsed(item.name)" class="lmp-group-body"\
 									@dragover.prevent.stop="dragOverGroupBody($event, item.name)"\
@@ -3014,6 +3052,12 @@
 								groupMasks[value] = groupMasks[oldName];
 								delete groupMasks[oldName];
 							}
+							// Move group opacity to new name
+							var td = getTexData();
+							if (td.groupOpacities[oldName] != null) {
+								td.groupOpacities[value] = td.groupOpacities[oldName];
+								delete td.groupOpacities[oldName];
+							}
 							var oi = _treeOrder().indexOf('group:' + oldName);
 							if (oi !== -1) _treeOrder()[oi] = 'group:' + value;
 							updatePanel();
@@ -3050,6 +3094,14 @@
 						applyFilter(val);
 						event.target.value = '';
 					}
+					this.tick++;
+				},
+				getGroupOpacity: function (groupName) {
+					this.tick;
+					return getGroupOpacity(groupName);
+				},
+				setGroupOpacity: function (groupName, event) {
+					setGroupOpacity(groupName, parseInt(event.target.value, 10));
 					this.tick++;
 				},
 				toggleGroupVis: function (groupName) {
@@ -3534,6 +3586,10 @@
 				.lmp-grp-btn i { font-size: 15px; }\
 				\
 				/* Group body (contains grouped layers) */\
+				.lmp-group-opacity { display: flex; align-items: center; gap: 4px; padding: 2px 8px; border-top: 1px solid var(--color-border); font-size: 11px; }\
+				.lmp-group-opacity label { opacity: 0.7; min-width: 42px; }\
+				.lmp-group-opacity input[type="range"] { flex: 1; height: 12px; }\
+				.lmp-group-opacity span { min-width: 32px; text-align: right; font-size: 10px; opacity: 0.7; }\
 				.lmp-group-body { padding: 2px 2px 2px 8px; border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-back) 50%, transparent); }\
 				.lmp-group-body .lmp-layer-item { background: transparent; border-color: transparent; margin-bottom: 0; padding-left: 14px; border-left: 2px solid var(--color-border); border-radius: 0 4px 4px 0; }\
 				.lmp-group-body .lmp-layer-item:hover { background: var(--color-button); }\
