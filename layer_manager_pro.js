@@ -829,12 +829,16 @@
 
 	// ---- Layer Group (Folder) Management ----
 
-	function createLayerGroup(name) {
+	function createLayerGroup(name, layerUUIDs) {
 		if (!name) {
 			Blockbench.textPrompt('New Layer Group', 'Group 1', function (value) {
 				if (value && !_groups()[value]) {
 					_groups()[value] = [];
 					_treeOrder().unshift('group:' + value);
+					if (layerUUIDs && layerUUIDs.length > 0) {
+						layerUUIDs.forEach(function (uuid) { addLayerToGroup(value, uuid); });
+						multiSelected.clear();
+					}
 					Blockbench.showQuickMessage('Created group: ' + value, 1500);
 					updatePanel();
 				}
@@ -842,6 +846,10 @@
 		} else if (!_groups()[name]) {
 			_groups()[name] = [];
 			_treeOrder().unshift('group:' + name);
+			if (layerUUIDs && layerUUIDs.length > 0) {
+				layerUUIDs.forEach(function (uuid) { addLayerToGroup(name, uuid); });
+				multiSelected.clear();
+			}
 			updatePanel();
 		}
 	}
@@ -2829,7 +2837,14 @@
 				mergeVisible: mergeVisibleLayers,
 				flattenAll: flattenAllLayers,
 				createGroup: function () {
-					createLayerGroup();
+					var uuids = [];
+					if (multiSelected.size > 0) {
+						multiSelected.forEach(function (uid) { uuids.push(uid); });
+					} else {
+						var sel = getSelectedLayer();
+						if (sel) uuids.push(sel.uuid);
+					}
+					createLayerGroup(null, uuids);
 				},
 				selectLayer: function (layer, event) {
 					// Exit mask edit mode when selecting a different layer
