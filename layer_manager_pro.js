@@ -1046,6 +1046,73 @@
 		updatePanel();
 	}
 
+	function copyLayerToTexture(layer, targetTex) {
+		if (!layer || !targetTex) return;
+		ensureLayersEnabled(targetTex);
+		Undo.initEdit({ textures: [targetTex] });
+		var newLayer = new TextureLayer(
+			{ name: layer.name },
+			targetTex
+		);
+		newLayer.setSize(layer.canvas.width, layer.canvas.height);
+		newLayer.offset = [layer.offset ? layer.offset[0] : 0, layer.offset ? layer.offset[1] : 0];
+		newLayer.opacity = layer.opacity;
+		newLayer.blend_mode = layer.blend_mode;
+		newLayer.visible = layer.visible;
+		newLayer.ctx.drawImage(layer.canvas, 0, 0);
+		newLayer.addForEditing();
+		var td = getTexData(targetTex.uuid);
+		td.treeOrder.unshift(newLayer.uuid);
+		Undo.finishEdit('Copy layer to ' + targetTex.name);
+		targetTex.updateLayerChanges(true);
+		return newLayer;
+	}
+
+	function copyGroupToTexture(groupName, targetTex) {
+		if (!targetTex) return;
+		var srcTex = getSelectedTexture();
+		if (!srcTex) return;
+		var members = _groups()[groupName] || [];
+		if (members.length === 0) return;
+		ensureLayersEnabled(targetTex);
+		Undo.initEdit({ textures: [targetTex] });
+		var td = getTexData(targetTex.uuid);
+		// Create group on target texture if it doesn't exist
+		var targetGroupName = groupName;
+		var suffix = 1;
+		while (td.groups[targetGroupName]) {
+			targetGroupName = groupName + ' (' + suffix + ')';
+			suffix++;
+		}
+		td.groups[targetGroupName] = [];
+		td.treeOrder.unshift('group:' + targetGroupName);
+		// Copy each member layer
+		for (var i = 0; i < members.length; i++) {
+			var srcLayer = findLayerByUUID(members[i]);
+			if (!srcLayer) continue;
+			var newLayer = new TextureLayer(
+				{ name: srcLayer.name },
+				targetTex
+			);
+			newLayer.setSize(srcLayer.canvas.width, srcLayer.canvas.height);
+			newLayer.offset = [srcLayer.offset ? srcLayer.offset[0] : 0, srcLayer.offset ? srcLayer.offset[1] : 0];
+			newLayer.opacity = srcLayer.opacity;
+			newLayer.blend_mode = srcLayer.blend_mode;
+			newLayer.visible = srcLayer.visible;
+			newLayer.ctx.drawImage(srcLayer.canvas, 0, 0);
+			newLayer.addForEditing();
+			td.groups[targetGroupName].push(newLayer.uuid);
+		}
+		// Copy group opacity
+		var srcTd = getTexData(srcTex.uuid);
+		if (srcTd.groupOpacities[groupName] != null) {
+			td.groupOpacities[targetGroupName] = srcTd.groupOpacities[groupName];
+		}
+		Undo.finishEdit('Copy group to ' + targetTex.name);
+		targetTex.updateLayerChanges(true);
+		updatePanel();
+	}
+
 	function mergeVisibleLayers() {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled || tex.layers.length < 2) {
@@ -2786,6 +2853,29 @@
 							}
 						} : null,
 						'_',
+						(function () {
+							var otherTextures = Texture.all.filter(function (t) {
+								var cur = getSelectedTexture();
+								return cur && t.uuid !== cur.uuid;
+							});
+							if (otherTextures.length === 0) return null;
+							return {
+								name: 'Copy to...',
+								icon: 'content_copy',
+								children: otherTextures.map(function (t) {
+									return {
+										name: t.name || 'Texture',
+										icon: 'image',
+										click: function () {
+											copyLayerToTexture(layer, t);
+											Blockbench.showQuickMessage('Layer copied to ' + (t.name || 'texture'), 1500);
+											self.tick++;
+										}
+									};
+								})
+							};
+						})(),
+						'_',
 						{
 							name: 'Delete',
 							icon: 'delete',
@@ -3182,6 +3272,29 @@
 								self.tick++;
 							}
 						} : null,
+						'_',
+						(function () {
+							var otherTextures = Texture.all.filter(function (t) {
+								var cur = getSelectedTexture();
+								return cur && t.uuid !== cur.uuid;
+							});
+							if (otherTextures.length === 0) return null;
+							return {
+								name: 'Copy to...',
+								icon: 'content_copy',
+								children: otherTextures.map(function (t) {
+									return {
+										name: t.name || 'Texture',
+										icon: 'image',
+										click: function () {
+											copyGroupToTexture(groupName, t);
+											Blockbench.showQuickMessage('Group copied to ' + (t.name || 'texture'), 1500);
+											self.tick++;
+										}
+									};
+								})
+							};
+						})(),
 						'_',
 						{
 							name: 'Delete Group',
