@@ -60,6 +60,7 @@
 		sourceGroup: null,
 		groupName: null,
 		filterId: null,
+		dragEl: null,      // reference to dragged DOM element
 	};
 
 	// ---- Mask Editing Mode state ----
@@ -70,6 +71,22 @@
 		savedCanvas: null,
 		savedCtx: null,
 	};
+
+	// ---- Helpers ----
+
+	function createCanvas(w, h) {
+		var c = document.createElement('canvas');
+		c.width = w; c.height = h;
+		return { canvas: c, ctx: c.getContext('2d') };
+	}
+
+	function getLayerOffset(layer) {
+		return layer && layer.offset ? [layer.offset[0], layer.offset[1]] : [0, 0];
+	}
+
+	function getLayerOpacity(layer) {
+		return layer && layer.opacity != null ? layer.opacity : 100;
+	}
 
 	function getDragPos(event, element) {
 		var rect = element.getBoundingClientRect();
@@ -673,6 +690,7 @@
 	// Also attempts to re-map UUIDs by matching layer names when possible
 	function cleanupStaleRefs(tex) {
 		if (!tex || !tex.layers_enabled) return;
+		_invalidateGroupCache();
 		var td = getTexData(tex.uuid);
 		var validUUIDs = new Set();
 		var layersByName = {};
@@ -858,6 +876,7 @@
 		if (!_groups()[groupName]) return;
 		if (_groups()[groupName].indexOf(layerUUID) === -1) {
 			_groups()[groupName].push(layerUUID);
+			_invalidateGroupCache();
 		}
 		// Remove from treeOrder top-level (now inside a group)
 		var ti = _treeOrder().indexOf(layerUUID);
@@ -871,6 +890,7 @@
 		const idx = _groups()[groupName].indexOf(layerUUID);
 		if (idx !== -1) {
 			_groups()[groupName].splice(idx, 1);
+			_invalidateGroupCache();
 		}
 		// Add back to treeOrder if not in any other group
 		if (!getLayerGroupName(layerUUID)) {
@@ -890,6 +910,7 @@
 		var gi = _treeOrder().indexOf('group:' + groupName);
 		var members = (_groups()[groupName] || []).slice();
 		delete _groups()[groupName];
+		_invalidateGroupCache();
 		var td = getTexData();
 		delete td.groupOpacities[groupName];
 		if (gi !== -1) {
@@ -1017,11 +1038,10 @@
 			tex
 		);
 		newLayer.setSize(layer.canvas.width, layer.canvas.height);
-		newLayer.offset = [layer.offset[0], layer.offset[1]];
-		newLayer.opacity = layer.opacity;
+		newLayer.offset = getLayerOffset(layer);
+		newLayer.opacity = getLayerOpacity(layer);
 		newLayer.blend_mode = layer.blend_mode;
 		newLayer.visible = layer.visible;
-		// Copy pixel data
 		newLayer.ctx.drawImage(layer.canvas, 0, 0);
 		newLayer.addForEditing();
 		// Insert duplicate right after original in treeOrder
@@ -1055,8 +1075,8 @@
 			targetTex
 		);
 		newLayer.setSize(layer.canvas.width, layer.canvas.height);
-		newLayer.offset = [layer.offset ? layer.offset[0] : 0, layer.offset ? layer.offset[1] : 0];
-		newLayer.opacity = layer.opacity;
+		newLayer.offset = getLayerOffset(layer);
+		newLayer.opacity = getLayerOpacity(layer);
 		newLayer.blend_mode = layer.blend_mode;
 		newLayer.visible = layer.visible;
 		newLayer.ctx.drawImage(layer.canvas, 0, 0);
@@ -1095,8 +1115,8 @@
 				targetTex
 			);
 			newLayer.setSize(srcLayer.canvas.width, srcLayer.canvas.height);
-			newLayer.offset = [srcLayer.offset ? srcLayer.offset[0] : 0, srcLayer.offset ? srcLayer.offset[1] : 0];
-			newLayer.opacity = srcLayer.opacity;
+			newLayer.offset = getLayerOffset(srcLayer);
+			newLayer.opacity = getLayerOpacity(srcLayer);
 			newLayer.blend_mode = srcLayer.blend_mode;
 			newLayer.visible = srcLayer.visible;
 			newLayer.ctx.drawImage(srcLayer.canvas, 0, 0);
@@ -1329,6 +1349,12 @@
 		var lastMtime = Date.now();
 		var pollInterval = setInterval(function () {
 			try {
+				// Stop if layer or texture was deleted
+				var edit = externalEdits[uuid];
+				if (!edit || !Texture.all.find(function (t) { return t.uuid === edit.texUUID; })) {
+					stopExternalEdit(uuid);
+					return;
+				}
 				var stat = fs.statSync(tmpFile);
 				var mtime = stat.mtimeMs;
 				if (mtime > lastMtime) {
@@ -1844,6 +1870,11 @@
 		var lastMtime = Date.now();
 		var poll = setInterval(function () {
 			try {
+				// Stop if texture was deleted
+				if (!Texture.all.find(function (t) { return t.uuid === psdEditState.texUUID; })) {
+					stopPsdEdit();
+					return;
+				}
 				var mtime = fs.statSync(tmpFile).mtimeMs;
 				if (mtime > lastMtime) {
 					lastMtime = mtime;
@@ -2190,6 +2221,7 @@
 	}
 
 	function clearLmpData() {
+		_invalidateGroupCache();
 		for (var key in perTextureData) delete perTextureData[key];
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
 		for (var key in layerMasks) delete layerMasks[key];
@@ -2198,6 +2230,7 @@
 	}
 
 	function _loadTexDataFromSrc(td, src) {
+		_invalidateGroupCache();
 		if (src.groups) {
 			for (var name in src.groups) {
 				td.groups[name] = src.groups[name].slice();
@@ -2288,11 +2321,9 @@
 				(function (gName, mData) {
 					var img = new Image();
 					img.onload = function () {
-						var c = document.createElement('canvas');
-						c.width = img.width; c.height = img.height;
-						var ctx = c.getContext('2d');
-						ctx.drawImage(img, 0, 0);
-						groupMasks[gName] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false };
+						var m = createCanvas(img.width, img.height);
+						m.ctx.drawImage(img, 0, 0);
+						groupMasks[gName] = { canvas: m.canvas, ctx: m.ctx, enabled: mData.enabled !== false };
 						// Re-apply to layers in this group
 						var grp = _groups()[gName];
 						if (grp) {
@@ -2304,6 +2335,9 @@
 							});
 						}
 						updatePanel();
+					};
+					img.onerror = function () {
+						console.warn('LMP: Failed to load group mask for ' + gName);
 					};
 					img.src = mData.data;
 				})(name, data.groupMasks[name]);
@@ -2391,11 +2425,30 @@
 		_saveDebounce = setTimeout(saveLmpToLocalStorage, 300);
 	}
 
-	function getLayerGroupName(uuid) {
-		for (var name in _groups()) {
-			if (_groups()[name].indexOf(uuid) !== -1) return name;
+	// Reverse-index cache: uuid → groupName (rebuilt on demand)
+	var _groupRevCache = null;
+	var _groupRevCacheTexUUID = null;
+
+	function _invalidateGroupCache() { _groupRevCache = null; }
+
+	function _buildGroupRevCache() {
+		var tex = getSelectedTexture();
+		var texUUID = tex ? tex.uuid : null;
+		if (_groupRevCache && _groupRevCacheTexUUID === texUUID) return _groupRevCache;
+		_groupRevCache = {};
+		_groupRevCacheTexUUID = texUUID;
+		var groups = _groups();
+		for (var name in groups) {
+			var members = groups[name];
+			for (var i = 0; i < members.length; i++) {
+				_groupRevCache[members[i]] = name;
+			}
 		}
-		return null;
+		return _groupRevCache;
+	}
+
+	function getLayerGroupName(uuid) {
+		return _buildGroupRevCache()[uuid] || null;
 	}
 
 	function buildPanelComponent() {
@@ -3137,6 +3190,7 @@
 						if (value && value !== oldName && !_groups()[value]) {
 							_groups()[value] = _groups()[oldName];
 							delete _groups()[oldName];
+							_invalidateGroupCache();
 							// Move group mask to new name
 							if (groupMasks[oldName]) {
 								groupMasks[value] = groupMasks[oldName];
@@ -3338,6 +3392,7 @@
 					dragInfo.type = 'layer';
 					dragInfo.layerUUID = uuid;
 					dragInfo.sourceGroup = sourceGroup;
+					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'layer:' + uuid);
 					e.target.classList.add('lmp-dragging');
@@ -3345,12 +3400,14 @@
 				startDragGroup: function (e, groupName) {
 					dragInfo.type = 'group';
 					dragInfo.groupName = groupName;
+					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'group:' + groupName);
 				},
 				startDragFilter: function (e, filterId) {
 					dragInfo.type = 'filter';
 					dragInfo.filterId = filterId;
+					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'filter:' + filterId);
 					e.target.classList.add('lmp-dragging');
@@ -3400,16 +3457,17 @@
 					}
 				},
 				dragEnd: function () {
+					if (dragInfo.dragEl) {
+						dragInfo.dragEl.classList.remove('lmp-dragging');
+					}
 					dragInfo.type = null;
 					dragInfo.layerUUID = null;
 					dragInfo.sourceGroup = null;
 					dragInfo.groupName = null;
 					dragInfo.filterId = null;
+					dragInfo.dragEl = null;
 					this.dropId = null;
 					this.dropPos = null;
-					document.querySelectorAll('.lmp-dragging').forEach(function (el) {
-						el.classList.remove('lmp-dragging');
-					});
 					this.tick++;
 				},
 
@@ -3918,6 +3976,7 @@
 			});
 
 			// Periodic fallback update to catch any missed state changes
+			if (updateInterval) clearInterval(updateInterval);
 			updateInterval = setInterval(function () {
 				updatePanel();
 			}, 500);
