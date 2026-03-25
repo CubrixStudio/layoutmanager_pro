@@ -8,6 +8,7 @@
 	let mergeVisibleAction;
 	let flattenLayersAction;
 	let toggleLockAction;
+	let mergeDownAction;
 	let css;
 	let updateInterval;
 	const eventListeners = [];
@@ -686,6 +687,29 @@
 	}
 
 	// Validate and clean up stale UUIDs in treeOrder and groups
+	function cleanupLayerResources(uuid) {
+		if (layerMasks[uuid]) {
+			layerMasks[uuid].canvas = null;
+			layerMasks[uuid].ctx = null;
+			delete layerMasks[uuid];
+		}
+		if (layerFilterStacks[uuid]) {
+			layerFilterStacks[uuid].original = null;
+			delete layerFilterStacks[uuid];
+		}
+		if (externalEdits[uuid]) {
+			stopExternalEdit(uuid);
+		}
+	}
+
+	function cleanupGroupResources(groupName) {
+		if (groupMasks[groupName]) {
+			groupMasks[groupName].canvas = null;
+			groupMasks[groupName].ctx = null;
+			delete groupMasks[groupName];
+		}
+	}
+
 	// Removes references to layers that no longer exist in the texture
 	// Also attempts to re-map UUIDs by matching layer names when possible
 	function cleanupStaleRefs(tex) {
@@ -913,6 +937,7 @@
 		_invalidateGroupCache();
 		var td = getTexData();
 		delete td.groupOpacities[groupName];
+		cleanupGroupResources(groupName);
 		if (gi !== -1) {
 			_treeOrder().splice(gi, 1);
 			// Insert members where the group was
@@ -1133,6 +1158,53 @@
 		updatePanel();
 	}
 
+	function mergeDown() {
+		var tex = getSelectedTexture();
+		var layer = getSelectedLayer();
+		if (!tex || !layer) {
+			Blockbench.showQuickMessage('No layer selected', 1500);
+			return;
+		}
+		// Find the layer below in tex.layers (render order: bottom=0, top=last)
+		var idx = tex.layers.indexOf(layer);
+		if (idx <= 0) {
+			Blockbench.showQuickMessage('No layer below to merge into', 1500);
+			return;
+		}
+		var below = tex.layers[idx - 1];
+		if (isLayerLocked(below)) {
+			Blockbench.showQuickMessage('Target layer is locked', 1500);
+			return;
+		}
+
+		Undo.initEdit({ textures: [tex] });
+
+		// Draw current layer onto the one below with opacity
+		below.ctx.globalAlpha = getLayerOpacity(layer) / 100;
+		var off = getLayerOffset(layer);
+		var belowOff = getLayerOffset(below);
+		below.ctx.drawImage(layer.canvas, off[0] - belowOff[0], off[1] - belowOff[1]);
+		below.ctx.globalAlpha = 1;
+
+		// Remove the upper layer
+		var gn = getLayerGroupName(layer.uuid);
+		if (gn) {
+			var ga = _groups()[gn];
+			if (ga) { var ri = ga.indexOf(layer.uuid); if (ri !== -1) ga.splice(ri, 1); }
+			_invalidateGroupCache();
+		}
+		var ti = _treeOrder().indexOf(layer.uuid);
+		if (ti !== -1) _treeOrder().splice(ti, 1);
+		cleanupLayerResources(layer.uuid);
+		layer.remove(false);
+
+		// Select the merged-into layer
+		below.select();
+		Undo.finishEdit('Merge down');
+		tex.updateLayerChanges(true);
+		updatePanel();
+	}
+
 	function mergeVisibleLayers() {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled || tex.layers.length < 2) {
@@ -1160,7 +1232,7 @@
 
 		// Draw all visible layers from bottom to top
 		visibleLayers.forEach(function (l) {
-			merged.ctx.globalAlpha = l.opacity;
+			merged.ctx.globalAlpha = getLayerOpacity(l) / 100;
 			merged.ctx.drawImage(l.canvas, l.offset[0], l.offset[1]);
 		});
 		merged.ctx.globalAlpha = 1;
@@ -1175,6 +1247,7 @@
 			}
 			var ti = _treeOrder().indexOf(vuuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
+			cleanupLayerResources(vuuid);
 			visibleLayers[i].remove(false);
 		}
 
@@ -1221,6 +1294,7 @@
 			}
 			var ti = _treeOrder().indexOf(uuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
+			cleanupLayerResources(uuid);
 			selectedLayers[i].remove(false);
 		}
 
@@ -1250,7 +1324,7 @@
 		// Draw all layers from bottom to top
 		tex.layers.slice().forEach(function (l) {
 			if (l.visible) {
-				flattened.ctx.globalAlpha = l.opacity;
+				flattened.ctx.globalAlpha = getLayerOpacity(l) / 100;
 				flattened.ctx.drawImage(l.canvas, l.offset[0], l.offset[1]);
 			}
 		});
@@ -1259,6 +1333,7 @@
 		// Remove all existing layers
 		const toRemove = tex.layers.slice();
 		for (let i = toRemove.length - 1; i >= 0; i--) {
+			cleanupLayerResources(toRemove[i].uuid);
 			toRemove[i].remove(false);
 		}
 
@@ -1307,6 +1382,9 @@
 					Undo.finishEdit('Import image as layer');
 					tex.updateLayerChanges(true);
 					updatePanel();
+				};
+				img.onerror = function () {
+					Blockbench.showQuickMessage('Failed to load image: ' + (file.name || 'unknown'), 2000);
 				};
 				img.src = file.content;
 			}
@@ -2298,17 +2376,18 @@
 				(function (uid, mData) {
 					var img = new Image();
 					img.onload = function () {
-						var c = document.createElement('canvas');
-						c.width = img.width; c.height = img.height;
-						var ctx = c.getContext('2d');
-						ctx.drawImage(img, 0, 0);
-						layerMasks[uid] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false, original: null };
+						var m = createCanvas(img.width, img.height);
+						m.ctx.drawImage(img, 0, 0);
+						layerMasks[uid] = { canvas: m.canvas, ctx: m.ctx, enabled: mData.enabled !== false, original: null };
 						// Re-apply mask after load
 						var layer = findLayerByUUID(uid);
 						if (layer) {
 							setTimeout(function () { applyMaskToLayer(layer); }, 300);
 						}
 						updatePanel();
+					};
+					img.onerror = function () {
+						console.warn('LMP: Failed to load layer mask for ' + uid);
 					};
 					img.src = mData.data;
 				})(uuid, data.masks[uuid]);
@@ -2930,6 +3009,14 @@
 						})(),
 						'_',
 						{
+							name: 'Merge Down',
+							icon: 'vertical_align_bottom',
+							click: function () {
+								mergeDown();
+								self.tick++;
+							}
+						},
+						{
 							name: 'Delete',
 							icon: 'delete',
 							click: function () {
@@ -3148,9 +3235,13 @@
 					this.$set(this.collapsed, groupName, !this.collapsed[groupName]);
 				},
 				toggleVis: function (layer) {
-					layer.toggleVisibility();
 					var tex = getSelectedTexture();
-					if (tex) tex.updateLayerChanges(true);
+					if (tex) Undo.initEdit({ textures: [tex] });
+					layer.toggleVisibility();
+					if (tex) {
+						tex.updateLayerChanges(true);
+						Undo.finishEdit('Toggle layer visibility');
+					}
 					this.tick++;
 				},
 				toggleLock: function (layer) {
@@ -3169,9 +3260,11 @@
 					if (gn) {
 						var ga = _groups()[gn];
 						if (ga) { var ri = ga.indexOf(layer.uuid); if (ri !== -1) ga.splice(ri, 1); }
+						_invalidateGroupCache();
 					}
 					var ti = _treeOrder().indexOf(layer.uuid);
 					if (ti !== -1) _treeOrder().splice(ti, 1);
+					cleanupLayerResources(layer.uuid);
 					layer.remove(true);
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
@@ -3180,7 +3273,10 @@
 				renameLayer: function (layer) {
 					Blockbench.textPrompt('Rename Layer', layer.name, function (value) {
 						if (value) {
+							var tex = getSelectedTexture();
+							if (tex) Undo.initEdit({ textures: [tex] });
 							layer.name = value;
+							if (tex) Undo.finishEdit('Rename layer');
 							updatePanel();
 						}
 					});
@@ -3215,9 +3311,13 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					layer.opacity = parseInt(event.target.value, 10);
 					var tex = getSelectedTexture();
-					if (tex) tex.updateLayerChanges(true);
+					if (tex) Undo.initEdit({ textures: [tex] });
+					layer.opacity = parseInt(event.target.value, 10);
+					if (tex) {
+						tex.updateLayerChanges(true);
+						Undo.finishEdit('Change layer opacity');
+					}
 					this.tick++;
 				},
 				setBlendMode: function (event) {
@@ -3227,9 +3327,13 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					layer.blend_mode = event.target.value;
 					var tex = getSelectedTexture();
-					if (tex) tex.updateLayerChanges(true);
+					if (tex) Undo.initEdit({ textures: [tex] });
+					layer.blend_mode = event.target.value;
+					if (tex) {
+						tex.updateLayerChanges(true);
+						Undo.finishEdit('Change blend mode');
+					}
 					this.tick++;
 				},
 				onApplyFilter: function (event) {
@@ -3840,6 +3944,7 @@
 				name: 'Add Layer',
 				description: 'Add a new empty layer to the selected texture',
 				icon: 'add',
+				keybind: new Keybind({ key: 'n', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: addNewLayer,
 			});
@@ -3848,6 +3953,7 @@
 				name: 'Duplicate Layer',
 				description: 'Duplicate the selected layer',
 				icon: 'content_copy',
+				keybind: new Keybind({ key: 'd', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: duplicateSelectedLayer,
 			});
@@ -3856,6 +3962,7 @@
 				name: 'Merge Visible Layers',
 				description: 'Merge all visible layers into one',
 				icon: 'call_merge',
+				keybind: new Keybind({ key: 'e', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: mergeVisibleLayers,
 			});
@@ -3864,6 +3971,7 @@
 				name: 'Flatten All Layers',
 				description: 'Flatten all layers into a single layer',
 				icon: 'layers_clear',
+				keybind: new Keybind({ key: 'f', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: flattenAllLayers,
 			});
@@ -3872,6 +3980,7 @@
 				name: 'Toggle Layer Lock',
 				description: 'Lock or unlock the selected layer',
 				icon: 'lock',
+				keybind: new Keybind({ key: 191 }),
 				condition: { modes: ['paint'] },
 				click: function () {
 					var layer = getSelectedLayer();
@@ -3883,8 +3992,18 @@
 				name: 'Import Image as Layer',
 				description: 'Import an image file as a new layer',
 				icon: 'image',
+				keybind: new Keybind({ key: 'i', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: importImageAsLayer,
+			});
+
+			mergeDownAction = new Action('lmp_merge_down', {
+				name: 'Merge Down',
+				description: 'Merge the selected layer into the layer below',
+				icon: 'vertical_align_bottom',
+				keybind: new Keybind({ key: 'e', ctrl: true }),
+				condition: { modes: ['paint'] },
+				click: mergeDown,
 			});
 
 			// Add to texture menu
@@ -4052,12 +4171,14 @@
 			if (flattenLayersAction) flattenLayersAction.delete();
 			if (toggleLockAction) toggleLockAction.delete();
 			if (importLayerAction) importLayerAction.delete();
+			if (mergeDownAction) mergeDownAction.delete();
 
 			MenuBar.removeAction('texture.lmp_add_layer');
 			MenuBar.removeAction('texture.lmp_duplicate_layer');
 			MenuBar.removeAction('texture.lmp_import_layer');
 			MenuBar.removeAction('texture.lmp_merge_visible');
 			MenuBar.removeAction('texture.lmp_flatten_layers');
+			MenuBar.removeAction('texture.lmp_merge_down');
 			MenuBar.removeAction('texture.lmp_toggle_lock');
 
 			clearLmpData();
