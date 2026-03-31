@@ -2246,12 +2246,58 @@
 			var td = perTextureData[texUUID];
 			var hasGroups = Object.keys(td.groups).length > 0;
 			var hasLocks = td.locks.size > 0;
-			if (hasGroups || hasLocks || td.treeOrder.length > 0) {
+			var hasLayerStates = false;
+
+			// Check if we need to save layer-specific data
+			if (tex && tex.layers_enabled) {
+				for (var i = 0; i < td.treeOrder.length; i++) {
+					var entry = td.treeOrder[i];
+					if (entry.indexOf('group:') === 0) continue;
+					var idx = findLayerIndexByUUID(entry);
+					if (idx !== -1) {
+						var layer = tex.layers[idx];
+						var hasNonDefault = layer.visible === false ||
+				           			 layer.offset ||
+				           			 layer.blend_mode !== 'default' ||
+				           			 layer.locked;
+						if (hasNonDefault) {
+							hasLayerStates = true;
+							break;
+						}
+					}
+				}
+			}
+
+			if (hasGroups || hasLocks || td.treeOrder.length > 0 || hasLayerStates) {
 				perTex[texUUID] = {
 					groups: JSON.parse(JSON.stringify(td.groups)),
 					treeOrder: td.treeOrder.slice(),
 					locks: Array.from(td.locks),
 					groupOpacities: JSON.parse(JSON.stringify(td.groupOpacities || {})),
+					// Save layer-specific states (lock, opacity, visible, blend mode, offset)
+					layerStates: (function () {
+						var out = {};
+						if (!tex) return out;
+						for (var i = 0; i < tex.layers.length; i++) {
+							var layer = tex.layers[i];
+							var visibleState = layer.visible === false ? 'hidden' : null;
+							var opacityState = layer.opacity !== 100 ? layer.opacity : null;
+							var blendModeState = layer.blend_mode !== 'default' ? layer.blend_mode : null;
+							var offsetState = layer.offset && (layer.offset[0] !== 0 || layer.offset[1] !== 0) ? layer.offset : null;
+							var lockedState = layer.locked ? true : null;
+
+							if (visibleState || opacityState || blendModeState || offsetState || lockedState) {
+								out[layer.uuid] = {
+									visible: visibleState,
+									opacity: opacityState,
+									blendMode: blendModeState,
+									offset: offsetState,
+									locked: lockedState,
+								};
+							}
+						}
+						return out;
+					})(),
 				};
 			}
 		}
@@ -2309,16 +2355,20 @@
 
 	function _loadTexDataFromSrc(td, src) {
 		_invalidateGroupCache();
+		// Clear existing data first to ensure clean restore from saved state
+		td.groups = {};
+		td.treeOrder = [];
+		td.locks = new Set();
+		td.groupOpacities = {};
+
 		if (src.groups) {
 			for (var name in src.groups) {
 				td.groups[name] = src.groups[name].slice();
 			}
 		}
 		if (src.treeOrder && Array.isArray(src.treeOrder)) {
-			// New format: unified tree order
-			src.treeOrder.forEach(function (entry) {
-				td.treeOrder.push(entry);
-			});
+			// New format: unified tree order - use directly instead of pushing
+			td.treeOrder = src.treeOrder.slice();
 		} else if (src.groupOrder && Array.isArray(src.groupOrder)) {
 			// Legacy format: convert groupOrder to treeOrder (groups only)
 			src.groupOrder.forEach(function (n) {
@@ -2420,6 +2470,47 @@
 					};
 					img.src = mData.data;
 				})(name, data.groupMasks[name]);
+			}
+		}
+
+		// Restore layer-specific states (visible, opacity, blend mode, offset, locked)
+		if (data.perTexture) {
+			for (var texUUID in data.perTexture) {
+				var layerStates = data.perTexture[texUUID].layerStates || {};
+				if (Object.keys(layerStates).length > 0) {
+					// Wait for layers to be synced, then apply states
+					setTimeout(function () {
+						var tex = getSelectedTexture();
+						if (!tex || !tex.layers_enabled) return;
+						for (var uuid in layerStates) {
+							var state = layerStates[uuid];
+							if (state) {
+								var layer = findLayerByUUID(uuid);
+								if (layer) {
+									if (state.visible === 'hidden') {
+										layer.visible = false;
+									} else if (state.visible) {
+										layer.visible = true;
+									}
+									if (state.opacity !== undefined) {
+										layer.opacity = state.opacity;
+									}
+									if (state.blendMode) {
+										layer.blend_mode = state.blendMode;
+									}
+									if (state.offset) {
+										layer.offset = state.offset;
+									}
+									if (state.locked !== undefined) {
+										layer.locked = state.locked;
+									}
+								}
+							}
+						}
+						tex.updateLayerChanges(true);
+						updatePanel();
+					}, 100);
+				}
 			}
 		}
 
