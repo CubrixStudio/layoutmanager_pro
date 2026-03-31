@@ -2247,9 +2247,11 @@
 			var hasGroups = Object.keys(td.groups).length > 0;
 			var hasLocks = td.locks.size > 0;
 			var hasLayerStates = false;
+			var tex = Texture.all.find(function(t) { return t.uuid === texUUID; });
+			if (!tex) continue;
 
 			// Check if we need to save layer-specific data
-			if (tex && tex.layers_enabled) {
+			if (tex.layers_enabled) {
 				for (var i = 0; i < td.treeOrder.length; i++) {
 					var entry = td.treeOrder[i];
 					if (entry.indexOf('group:') === 0) continue;
@@ -2257,13 +2259,13 @@
 					if (idx !== -1) {
 						var layer = tex.layers[idx];
 						var hasNonDefault = layer.visible === false ||
-				           			 layer.offset ||
-				           			 layer.blend_mode !== 'default' ||
-				           			 layer.locked;
-						if (hasNonDefault) {
-							hasLayerStates = true;
-							break;
-						}
+								layer.offset ||
+								layer.blend_mode !== 'default' ||
+								layer.locked;
+								if (hasNonDefault) {
+									hasLayerStates = true;
+									break;
+									}
 					}
 				}
 			}
@@ -2277,7 +2279,6 @@
 					// Save layer-specific states (lock, opacity, visible, blend mode, offset)
 					layerStates: (function () {
 						var out = {};
-						if (!tex) return out;
 						for (var i = 0; i < tex.layers.length; i++) {
 							var layer = tex.layers[i];
 							var visibleState = layer.visible === false ? 'hidden' : null;
