@@ -8,7 +8,6 @@
 	let mergeVisibleAction;
 	let flattenLayersAction;
 	let toggleLockAction;
-	let mergeDownAction;
 	let css;
 	let updateInterval;
 	const eventListeners = [];
@@ -18,16 +17,16 @@
 
 	// Per-texture data: groups, tree order, and locks (independent per texture)
 	// treeOrder entries: 'group:Name' for groups, 'uuid' for ungrouped layers
-	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set, groupOpacities: {} } }
+	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set } }
 
 	function getTexData(texUUID) {
 		if (!texUUID) {
 			var tex = getSelectedTexture();
-			if (!tex) return { groups: {}, treeOrder: [], locks: new Set(), groupOpacities: {} };
+			if (!tex) return { groups: {}, treeOrder: [], locks: new Set() };
 			texUUID = tex.uuid;
 		}
 		if (!perTextureData[texUUID]) {
-			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set(), groupOpacities: {} };
+			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set() };
 		}
 		return perTextureData[texUUID];
 	}
@@ -61,7 +60,6 @@
 		sourceGroup: null,
 		groupName: null,
 		filterId: null,
-		dragEl: null,      // reference to dragged DOM element
 	};
 
 	// ---- Mask Editing Mode state ----
@@ -72,22 +70,6 @@
 		savedCanvas: null,
 		savedCtx: null,
 	};
-
-	// ---- Helpers ----
-
-	function createCanvas(w, h) {
-		var c = document.createElement('canvas');
-		c.width = w; c.height = h;
-		return { canvas: c, ctx: c.getContext('2d') };
-	}
-
-	function getLayerOffset(layer) {
-		return layer && layer.offset ? [layer.offset[0], layer.offset[1]] : [0, 0];
-	}
-
-	function getLayerOpacity(layer) {
-		return layer && layer.opacity != null ? layer.opacity : 100;
-	}
 
 	function getDragPos(event, element) {
 		var rect = element.getBoundingClientRect();
@@ -342,16 +324,6 @@
 		return null;
 	}
 
-	function findFirstValidLayerInGroup(groupName) {
-		var grp = _groups()[groupName];
-		if (!grp) return null;
-		for (var i = 0; i < grp.length; i++) {
-			var layer = findLayerByUUID(grp[i]);
-			if (layer && layer.canvas) return layer;
-		}
-		return null;
-	}
-
 	// Snapshot the original pixels before applying mask (so we can restore later)
 	function snapshotMaskOriginal(layer) {
 		var mask = layerMasks[layer.uuid];
@@ -477,15 +449,12 @@
 			}
 		}
 
+		var exitGroupName = maskEditMode.groupName;
+
 		if (layer && maskEditMode.savedCanvas && maskEditMode.savedCtx) {
+			// Restore the real canvas/ctx on the swapped layer
 			layer.canvas = maskEditMode.savedCanvas;
 			layer.ctx = maskEditMode.savedCtx;
-
-			var mask = layerMasks[layer.uuid];
-			if (mask) {
-				mask.original = null; // Force re-snapshot
-			}
-			applyMaskToLayer(layer);
 		}
 
 		maskEditMode.active = false;
@@ -493,6 +462,27 @@
 		maskEditMode.groupName = null;
 		maskEditMode.savedCanvas = null;
 		maskEditMode.savedCtx = null;
+
+		if (exitGroupName) {
+			// Group mask: re-apply to ALL layers in the group
+			var grp = _groups()[exitGroupName];
+			if (grp) {
+				grp.forEach(function (uuid) {
+					var gl = findLayerByUUID(uuid);
+					if (gl) {
+						// Reset mask originals so they get re-snapshotted
+						var lm = layerMasks[gl.uuid];
+						if (lm) lm.original = null;
+						applyMaskToLayer(gl);
+					}
+				});
+			}
+		} else if (layer) {
+			// Layer mask: re-apply to this layer only
+			var mask = layerMasks[layer.uuid];
+			if (mask) mask.original = null; // Force re-snapshot
+			applyMaskToLayer(layer);
+		}
 
 		if (tex) tex.updateLayerChanges(true);
 		updatePanel();
@@ -686,126 +676,6 @@
 		return Texture.selected || Texture.all[0];
 	}
 
-	// Validate and clean up stale UUIDs in treeOrder and groups
-	function cleanupLayerResources(uuid) {
-		if (layerMasks[uuid]) {
-			layerMasks[uuid].canvas = null;
-			layerMasks[uuid].ctx = null;
-			delete layerMasks[uuid];
-		}
-		if (layerFilterStacks[uuid]) {
-			layerFilterStacks[uuid].original = null;
-			delete layerFilterStacks[uuid];
-		}
-		if (externalEdits[uuid]) {
-			stopExternalEdit(uuid);
-		}
-	}
-
-	function cleanupGroupResources(groupName) {
-		if (groupMasks[groupName]) {
-			groupMasks[groupName].canvas = null;
-			groupMasks[groupName].ctx = null;
-			delete groupMasks[groupName];
-		}
-	}
-
-	// Removes references to layers that no longer exist in the texture
-	// Also attempts to re-map UUIDs by matching layer names when possible
-	function cleanupStaleRefs(tex) {
-		if (!tex || !tex.layers_enabled) return;
-		_invalidateGroupCache();
-		var td = getTexData(tex.uuid);
-		var validUUIDs = new Set();
-		var layersByName = {};
-		tex.layers.forEach(function (l) {
-			validUUIDs.add(l.uuid);
-			// Build name→uuid map for re-mapping (use first match per name)
-			var n = l.name || '';
-			if (!layersByName[n]) layersByName[n] = [];
-			layersByName[n].push(l.uuid);
-		});
-
-		// Collect all UUIDs currently referenced (to know which valid UUIDs are "claimed")
-		var claimedUUIDs = new Set();
-		td.treeOrder.forEach(function (e) {
-			if (e.indexOf('group:') !== 0 && validUUIDs.has(e)) claimedUUIDs.add(e);
-		});
-		for (var gn in td.groups) {
-			td.groups[gn].forEach(function (uid) {
-				if (validUUIDs.has(uid)) claimedUUIDs.add(uid);
-			});
-		}
-
-		// Build a map of stale UUID → layer name (from previous save, if we stored it)
-		// We don't have names stored, so we rely on positional matching within groups
-		// For groups: try to remap stale member UUIDs to unclaimed valid UUIDs
-		var changed = false;
-		for (var gn in td.groups) {
-			var members = td.groups[gn];
-			for (var i = members.length - 1; i >= 0; i--) {
-				if (!validUUIDs.has(members[i])) {
-					// Stale UUID - remove it
-					members.splice(i, 1);
-					changed = true;
-				}
-			}
-			// Remove empty groups
-			if (members.length === 0) {
-				delete td.groups[gn];
-				var gi = td.treeOrder.indexOf('group:' + gn);
-				if (gi !== -1) td.treeOrder.splice(gi, 1);
-				changed = true;
-			}
-		}
-
-		// Clean up stale layer UUIDs from treeOrder
-		for (var i = td.treeOrder.length - 1; i >= 0; i--) {
-			var entry = td.treeOrder[i];
-			if (entry.indexOf('group:') === 0) {
-				// Check group still exists
-				var gname = entry.slice(6);
-				if (!td.groups[gname]) {
-					td.treeOrder.splice(i, 1);
-					changed = true;
-				}
-			} else if (!validUUIDs.has(entry)) {
-				// Stale layer UUID
-				td.treeOrder.splice(i, 1);
-				changed = true;
-			}
-		}
-
-		// Remove duplicate entries in treeOrder
-		var seen = new Set();
-		for (var i = td.treeOrder.length - 1; i >= 0; i--) {
-			if (seen.has(td.treeOrder[i])) {
-				td.treeOrder.splice(i, 1);
-				changed = true;
-			} else {
-				seen.add(td.treeOrder[i]);
-			}
-		}
-
-		// Ensure all ungrouped layers are in treeOrder
-		var allGroupedUUIDs = new Set();
-		for (var gn in td.groups) {
-			td.groups[gn].forEach(function (uid) { allGroupedUUIDs.add(uid); });
-		}
-		var treeSet = new Set(td.treeOrder);
-		tex.layers.forEach(function (l) {
-			if (!treeSet.has(l.uuid) && !allGroupedUUIDs.has(l.uuid)) {
-				td.treeOrder.push(l.uuid);
-				changed = true;
-			}
-		});
-
-		if (changed) {
-			console.log('LMP: Cleaned up stale references for texture ' + tex.uuid);
-		}
-		return changed;
-	}
-
 	// Sync tex.layers order to match treeOrder display
 	// treeOrder is top-to-bottom (visual), tex.layers is bottom-to-top (render)
 	function syncLayerOrder() {
@@ -871,16 +741,12 @@
 
 	// ---- Layer Group (Folder) Management ----
 
-	function createLayerGroup(name, layerUUIDs) {
+	function createLayerGroup(name) {
 		if (!name) {
 			Blockbench.textPrompt('New Layer Group', 'Group 1', function (value) {
 				if (value && !_groups()[value]) {
 					_groups()[value] = [];
 					_treeOrder().unshift('group:' + value);
-					if (layerUUIDs && layerUUIDs.length > 0) {
-						layerUUIDs.forEach(function (uuid) { addLayerToGroup(value, uuid); });
-						multiSelected.clear();
-					}
 					Blockbench.showQuickMessage('Created group: ' + value, 1500);
 					updatePanel();
 				}
@@ -888,10 +754,6 @@
 		} else if (!_groups()[name]) {
 			_groups()[name] = [];
 			_treeOrder().unshift('group:' + name);
-			if (layerUUIDs && layerUUIDs.length > 0) {
-				layerUUIDs.forEach(function (uuid) { addLayerToGroup(name, uuid); });
-				multiSelected.clear();
-			}
 			updatePanel();
 		}
 	}
@@ -900,7 +762,6 @@
 		if (!_groups()[groupName]) return;
 		if (_groups()[groupName].indexOf(layerUUID) === -1) {
 			_groups()[groupName].push(layerUUID);
-			_invalidateGroupCache();
 		}
 		// Remove from treeOrder top-level (now inside a group)
 		var ti = _treeOrder().indexOf(layerUUID);
@@ -914,7 +775,6 @@
 		const idx = _groups()[groupName].indexOf(layerUUID);
 		if (idx !== -1) {
 			_groups()[groupName].splice(idx, 1);
-			_invalidateGroupCache();
 		}
 		// Add back to treeOrder if not in any other group
 		if (!getLayerGroupName(layerUUID)) {
@@ -934,10 +794,6 @@
 		var gi = _treeOrder().indexOf('group:' + groupName);
 		var members = (_groups()[groupName] || []).slice();
 		delete _groups()[groupName];
-		_invalidateGroupCache();
-		var td = getTexData();
-		delete td.groupOpacities[groupName];
-		cleanupGroupResources(groupName);
 		if (gi !== -1) {
 			_treeOrder().splice(gi, 1);
 			// Insert members where the group was
@@ -961,31 +817,6 @@
 		const newState = !layers[0].visible;
 		layers.forEach(function (l) {
 			l.visible = newState;
-		});
-		tex.updateLayerChanges(true);
-		updatePanel();
-	}
-
-	function getGroupOpacity(groupName) {
-		var td = getTexData();
-		return td.groupOpacities[groupName] != null ? td.groupOpacities[groupName] : 100;
-	}
-
-	function setGroupOpacity(groupName, opacity) {
-		var td = getTexData();
-		var tex = getSelectedTexture();
-		if (!tex || !tex.layers_enabled) return;
-		var prev = td.groupOpacities[groupName] != null ? td.groupOpacities[groupName] : 100;
-		td.groupOpacities[groupName] = opacity;
-		var members = _groups()[groupName] || [];
-		members.forEach(function (uuid) {
-			var layer = findLayerByUUID(uuid);
-			if (layer) {
-				// Scale layer opacity proportionally: if group was at 80 and layer at 40,
-				// base ratio is 40/80 = 0.5. New group opacity 60 → layer = 60 * 0.5 = 30
-				var base = prev > 0 ? (layer.opacity / prev) : (1 / members.length);
-				layer.opacity = Math.round(Math.min(100, Math.max(0, base * opacity)));
-			}
 		});
 		tex.updateLayerChanges(true);
 		updatePanel();
@@ -1063,10 +894,11 @@
 			tex
 		);
 		newLayer.setSize(layer.canvas.width, layer.canvas.height);
-		newLayer.offset = getLayerOffset(layer);
-		newLayer.opacity = getLayerOpacity(layer);
+		newLayer.offset = [layer.offset[0], layer.offset[1]];
+		newLayer.opacity = layer.opacity;
 		newLayer.blend_mode = layer.blend_mode;
 		newLayer.visible = layer.visible;
+		// Copy pixel data
 		newLayer.ctx.drawImage(layer.canvas, 0, 0);
 		newLayer.addForEditing();
 		// Insert duplicate right after original in treeOrder
@@ -1087,120 +919,6 @@
 		}
 
 		Undo.finishEdit('Duplicate layer');
-		tex.updateLayerChanges(true);
-		updatePanel();
-	}
-
-	function copyLayerToTexture(layer, targetTex) {
-		if (!layer || !targetTex) return;
-		ensureLayersEnabled(targetTex);
-		Undo.initEdit({ textures: [targetTex] });
-		var newLayer = new TextureLayer(
-			{ name: layer.name },
-			targetTex
-		);
-		newLayer.setSize(layer.canvas.width, layer.canvas.height);
-		newLayer.offset = getLayerOffset(layer);
-		newLayer.opacity = getLayerOpacity(layer);
-		newLayer.blend_mode = layer.blend_mode;
-		newLayer.visible = layer.visible;
-		newLayer.ctx.drawImage(layer.canvas, 0, 0);
-		newLayer.addForEditing();
-		var td = getTexData(targetTex.uuid);
-		td.treeOrder.unshift(newLayer.uuid);
-		Undo.finishEdit('Copy layer to ' + targetTex.name);
-		targetTex.updateLayerChanges(true);
-		return newLayer;
-	}
-
-	function copyGroupToTexture(groupName, targetTex) {
-		if (!targetTex) return;
-		var srcTex = getSelectedTexture();
-		if (!srcTex) return;
-		var members = _groups()[groupName] || [];
-		if (members.length === 0) return;
-		ensureLayersEnabled(targetTex);
-		Undo.initEdit({ textures: [targetTex] });
-		var td = getTexData(targetTex.uuid);
-		// Create group on target texture if it doesn't exist
-		var targetGroupName = groupName;
-		var suffix = 1;
-		while (td.groups[targetGroupName]) {
-			targetGroupName = groupName + ' (' + suffix + ')';
-			suffix++;
-		}
-		td.groups[targetGroupName] = [];
-		td.treeOrder.unshift('group:' + targetGroupName);
-		// Copy each member layer
-		for (var i = 0; i < members.length; i++) {
-			var srcLayer = findLayerByUUID(members[i]);
-			if (!srcLayer) continue;
-			var newLayer = new TextureLayer(
-				{ name: srcLayer.name },
-				targetTex
-			);
-			newLayer.setSize(srcLayer.canvas.width, srcLayer.canvas.height);
-			newLayer.offset = getLayerOffset(srcLayer);
-			newLayer.opacity = getLayerOpacity(srcLayer);
-			newLayer.blend_mode = srcLayer.blend_mode;
-			newLayer.visible = srcLayer.visible;
-			newLayer.ctx.drawImage(srcLayer.canvas, 0, 0);
-			newLayer.addForEditing();
-			td.groups[targetGroupName].push(newLayer.uuid);
-		}
-		// Copy group opacity
-		var srcTd = getTexData(srcTex.uuid);
-		if (srcTd.groupOpacities[groupName] != null) {
-			td.groupOpacities[targetGroupName] = srcTd.groupOpacities[groupName];
-		}
-		Undo.finishEdit('Copy group to ' + targetTex.name);
-		targetTex.updateLayerChanges(true);
-		updatePanel();
-	}
-
-	function mergeDown() {
-		var tex = getSelectedTexture();
-		var layer = getSelectedLayer();
-		if (!tex || !layer) {
-			Blockbench.showQuickMessage('No layer selected', 1500);
-			return;
-		}
-		// Find the layer below in tex.layers (render order: bottom=0, top=last)
-		var idx = tex.layers.indexOf(layer);
-		if (idx <= 0) {
-			Blockbench.showQuickMessage('No layer below to merge into', 1500);
-			return;
-		}
-		var below = tex.layers[idx - 1];
-		if (isLayerLocked(below)) {
-			Blockbench.showQuickMessage('Target layer is locked', 1500);
-			return;
-		}
-
-		Undo.initEdit({ textures: [tex] });
-
-		// Draw current layer onto the one below with opacity
-		below.ctx.globalAlpha = getLayerOpacity(layer) / 100;
-		var off = getLayerOffset(layer);
-		var belowOff = getLayerOffset(below);
-		below.ctx.drawImage(layer.canvas, off[0] - belowOff[0], off[1] - belowOff[1]);
-		below.ctx.globalAlpha = 1;
-
-		// Remove the upper layer
-		var gn = getLayerGroupName(layer.uuid);
-		if (gn) {
-			var ga = _groups()[gn];
-			if (ga) { var ri = ga.indexOf(layer.uuid); if (ri !== -1) ga.splice(ri, 1); }
-			_invalidateGroupCache();
-		}
-		var ti = _treeOrder().indexOf(layer.uuid);
-		if (ti !== -1) _treeOrder().splice(ti, 1);
-		cleanupLayerResources(layer.uuid);
-		layer.remove(false);
-
-		// Select the merged-into layer
-		below.select();
-		Undo.finishEdit('Merge down');
 		tex.updateLayerChanges(true);
 		updatePanel();
 	}
@@ -1232,7 +950,7 @@
 
 		// Draw all visible layers from bottom to top
 		visibleLayers.forEach(function (l) {
-			merged.ctx.globalAlpha = getLayerOpacity(l) / 100;
+			merged.ctx.globalAlpha = l.opacity;
 			merged.ctx.drawImage(l.canvas, l.offset[0], l.offset[1]);
 		});
 		merged.ctx.globalAlpha = 1;
@@ -1247,7 +965,6 @@
 			}
 			var ti = _treeOrder().indexOf(vuuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
-			cleanupLayerResources(vuuid);
 			visibleLayers[i].remove(false);
 		}
 
@@ -1294,7 +1011,6 @@
 			}
 			var ti = _treeOrder().indexOf(uuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
-			cleanupLayerResources(uuid);
 			selectedLayers[i].remove(false);
 		}
 
@@ -1324,7 +1040,7 @@
 		// Draw all layers from bottom to top
 		tex.layers.slice().forEach(function (l) {
 			if (l.visible) {
-				flattened.ctx.globalAlpha = getLayerOpacity(l) / 100;
+				flattened.ctx.globalAlpha = l.opacity;
 				flattened.ctx.drawImage(l.canvas, l.offset[0], l.offset[1]);
 			}
 		});
@@ -1333,7 +1049,6 @@
 		// Remove all existing layers
 		const toRemove = tex.layers.slice();
 		for (let i = toRemove.length - 1; i >= 0; i--) {
-			cleanupLayerResources(toRemove[i].uuid);
 			toRemove[i].remove(false);
 		}
 
@@ -1383,9 +1098,6 @@
 					tex.updateLayerChanges(true);
 					updatePanel();
 				};
-				img.onerror = function () {
-					Blockbench.showQuickMessage('Failed to load image: ' + (file.name || 'unknown'), 2000);
-				};
 				img.src = file.content;
 			}
 		);
@@ -1427,12 +1139,6 @@
 		var lastMtime = Date.now();
 		var pollInterval = setInterval(function () {
 			try {
-				// Stop if layer or texture was deleted
-				var edit = externalEdits[uuid];
-				if (!edit || !Texture.all.find(function (t) { return t.uuid === edit.texUUID; })) {
-					stopExternalEdit(uuid);
-					return;
-				}
 				var stat = fs.statSync(tmpFile);
 				var mtime = stat.mtimeMs;
 				if (mtime > lastMtime) {
@@ -1581,18 +1287,19 @@
 					op: Math.round((layer.opacity != null ? layer.opacity : 100) * 255 / 100),
 					vis: layer.visible !== false, lsct: -1 });
 			} else if (e.type === 'group_end') {
-				// After reverse: group_end is first in PSD (bottom) = bounding section divider
-				var dnb = Buffer.from('</Layer group>', 'utf8');
-				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
-				lds.push({ kind: 'group_close', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
-					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
-			} else if (e.type === 'group_start') {
-				// After reverse: group_start is last in PSD (top) = open folder with group name
+				// In PSD bottom-to-top: group_end = bounding section divider (lsct type 3)
+				// This comes first (bottom) for the group
 				var gnb = Buffer.from(e.name, 'utf8');
 				if (gnb.length > 255) gnb = gnb.slice(0, 255);
 				var gnpl = Math.ceil((1 + gnb.length) / 4) * 4;
 				lds.push({ kind: 'group_open', w: 0, h: 0, ox: 0, oy: 0, nb: gnb, npl: gnpl,
 					op: 255, vis: true, lsct: 1 }); // lsct=1: open folder
+			} else if (e.type === 'group_start') {
+				// In PSD bottom-to-top: group_start = bounding divider (appears at top = last in bottom-to-top)
+				var dnb = Buffer.from('</Layer group>', 'utf8');
+				var dnpl = Math.ceil((1 + dnb.length) / 4) * 4;
+				lds.push({ kind: 'group_end', w: 0, h: 0, ox: 0, oy: 0, nb: dnb, npl: dnpl,
+					op: 255, vis: true, lsct: 3 }); // lsct=3: bounding section divider
 			}
 		}
 
@@ -1631,8 +1338,8 @@
 				wi16(-1); wu32(2); wi16(0); wu32(2); wi16(1); wu32(2); wi16(2); wu32(2); // minimal channel data (compression only)
 				wstr('8BIM'); wstr(d.lsct === 3 ? 'norm' : 'pass'); // pass-through for folder
 				w8(d.op); w8(0); w8(0); w8(0);
-				// Extra data: mask(4) + blending(4) + name(npl) + lsct block(24)
-				var lsctLen = 8 + 4 + 12; // '8BIM'(4) + 'lsct'(4) + length_field(4) + data(12: type+sig+blend)
+				// Extra data: mask(4) + blending(4) + name(npl) + lsct(8+12)
+				var lsctLen = 8 + 12; // '8BIM' + 'lsct' + length(4) + type(4) + '8BIM' + 'pass'/'norm'
 				wu32(4 + 4 + d.npl + lsctLen);
 				wu32(0); wu32(0); // mask + blending ranges
 				w8(d.nb.length); wbuf(d.nb);
@@ -1948,11 +1655,6 @@
 		var lastMtime = Date.now();
 		var poll = setInterval(function () {
 			try {
-				// Stop if texture was deleted
-				if (!Texture.all.find(function (t) { return t.uuid === psdEditState.texUUID; })) {
-					stopPsdEdit();
-					return;
-				}
 				var mtime = fs.statSync(tmpFile).mtimeMs;
 				if (mtime > lastMtime) {
 					lastMtime = mtime;
@@ -2246,59 +1948,11 @@
 			var td = perTextureData[texUUID];
 			var hasGroups = Object.keys(td.groups).length > 0;
 			var hasLocks = td.locks.size > 0;
-			var hasLayerStates = false;
-			var tex = Texture.all.find(function(t) { return t.uuid === texUUID; });
-			if (!tex) continue;
-
-			// Check if we need to save layer-specific data
-			if (tex.layers_enabled) {
-				for (var i = 0; i < td.treeOrder.length; i++) {
-					var entry = td.treeOrder[i];
-					if (entry.indexOf('group:') === 0) continue;
-					var idx = findLayerIndexByUUID(entry);
-					if (idx !== -1) {
-						var layer = tex.layers[idx];
-						var hasNonDefault = layer.visible === false ||
-								layer.offset ||
-								layer.blend_mode !== 'default' ||
-								layer.locked;
-								if (hasNonDefault) {
-									hasLayerStates = true;
-									break;
-									}
-					}
-				}
-			}
-
-			if (hasGroups || hasLocks || td.treeOrder.length > 0 || hasLayerStates) {
+			if (hasGroups || hasLocks || td.treeOrder.length > 0) {
 				perTex[texUUID] = {
 					groups: JSON.parse(JSON.stringify(td.groups)),
 					treeOrder: td.treeOrder.slice(),
 					locks: Array.from(td.locks),
-					groupOpacities: JSON.parse(JSON.stringify(td.groupOpacities || {})),
-					// Save layer-specific states (lock, opacity, visible, blend mode, offset)
-					layerStates: (function () {
-						var out = {};
-						for (var i = 0; i < tex.layers.length; i++) {
-							var layer = tex.layers[i];
-							var visibleState = layer.visible === false ? 'hidden' : null;
-							var opacityState = layer.opacity !== 100 ? layer.opacity : null;
-							var blendModeState = layer.blend_mode !== 'default' ? layer.blend_mode : null;
-							var offsetState = layer.offset && (layer.offset[0] !== 0 || layer.offset[1] !== 0) ? layer.offset : null;
-							var lockedState = layer.locked ? true : null;
-
-							if (visibleState || opacityState || blendModeState || offsetState || lockedState) {
-								out[layer.uuid] = {
-									visible: visibleState,
-									opacity: opacityState,
-									blendMode: blendModeState,
-									offset: offsetState,
-									locked: lockedState,
-								};
-							}
-						}
-						return out;
-					})(),
 				};
 			}
 		}
@@ -2346,7 +2000,6 @@
 	}
 
 	function clearLmpData() {
-		_invalidateGroupCache();
 		for (var key in perTextureData) delete perTextureData[key];
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
 		for (var key in layerMasks) delete layerMasks[key];
@@ -2355,21 +2008,16 @@
 	}
 
 	function _loadTexDataFromSrc(td, src) {
-		_invalidateGroupCache();
-		// Clear existing data first to ensure clean restore from saved state
-		td.groups = {};
-		td.treeOrder = [];
-		td.locks = new Set();
-		td.groupOpacities = {};
-
 		if (src.groups) {
 			for (var name in src.groups) {
 				td.groups[name] = src.groups[name].slice();
 			}
 		}
 		if (src.treeOrder && Array.isArray(src.treeOrder)) {
-			// New format: unified tree order - use directly instead of pushing
-			td.treeOrder = src.treeOrder.slice();
+			// New format: unified tree order
+			src.treeOrder.forEach(function (entry) {
+				td.treeOrder.push(entry);
+			});
 		} else if (src.groupOrder && Array.isArray(src.groupOrder)) {
 			// Legacy format: convert groupOrder to treeOrder (groups only)
 			src.groupOrder.forEach(function (n) {
@@ -2382,11 +2030,6 @@
 		}
 		if (src.locks && Array.isArray(src.locks)) {
 			src.locks.forEach(function (uuid) { td.locks.add(uuid); });
-		}
-		if (src.groupOpacities) {
-			for (var name in src.groupOpacities) {
-				td.groupOpacities[name] = src.groupOpacities[name];
-			}
 		}
 	}
 
@@ -2427,18 +2070,17 @@
 				(function (uid, mData) {
 					var img = new Image();
 					img.onload = function () {
-						var m = createCanvas(img.width, img.height);
-						m.ctx.drawImage(img, 0, 0);
-						layerMasks[uid] = { canvas: m.canvas, ctx: m.ctx, enabled: mData.enabled !== false, original: null };
+						var c = document.createElement('canvas');
+						c.width = img.width; c.height = img.height;
+						var ctx = c.getContext('2d');
+						ctx.drawImage(img, 0, 0);
+						layerMasks[uid] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false, original: null };
 						// Re-apply mask after load
 						var layer = findLayerByUUID(uid);
 						if (layer) {
 							setTimeout(function () { applyMaskToLayer(layer); }, 300);
 						}
 						updatePanel();
-					};
-					img.onerror = function () {
-						console.warn('LMP: Failed to load layer mask for ' + uid);
 					};
 					img.src = mData.data;
 				})(uuid, data.masks[uuid]);
@@ -2451,9 +2093,11 @@
 				(function (gName, mData) {
 					var img = new Image();
 					img.onload = function () {
-						var m = createCanvas(img.width, img.height);
-						m.ctx.drawImage(img, 0, 0);
-						groupMasks[gName] = { canvas: m.canvas, ctx: m.ctx, enabled: mData.enabled !== false };
+						var c = document.createElement('canvas');
+						c.width = img.width; c.height = img.height;
+						var ctx = c.getContext('2d');
+						ctx.drawImage(img, 0, 0);
+						groupMasks[gName] = { canvas: c, ctx: ctx, enabled: mData.enabled !== false };
 						// Re-apply to layers in this group
 						var grp = _groups()[gName];
 						if (grp) {
@@ -2466,64 +2110,13 @@
 						}
 						updatePanel();
 					};
-					img.onerror = function () {
-						console.warn('LMP: Failed to load group mask for ' + gName);
-					};
 					img.src = mData.data;
 				})(name, data.groupMasks[name]);
 			}
 		}
 
-		// Restore layer-specific states (visible, opacity, blend mode, offset, locked)
-		if (data.perTexture) {
-			for (var texUUID in data.perTexture) {
-				var layerStates = data.perTexture[texUUID].layerStates || {};
-				if (Object.keys(layerStates).length > 0) {
-					// Wait for layers to be synced, then apply states
-					setTimeout(function () {
-						var tex = getSelectedTexture();
-						if (!tex || !tex.layers_enabled) return;
-						for (var uuid in layerStates) {
-							var state = layerStates[uuid];
-							if (state) {
-								var layer = findLayerByUUID(uuid);
-								if (layer) {
-									if (state.visible === 'hidden') {
-										layer.visible = false;
-									} else if (state.visible) {
-										layer.visible = true;
-									}
-									if (state.opacity !== undefined) {
-										layer.opacity = state.opacity;
-									}
-									if (state.blendMode) {
-										layer.blend_mode = state.blendMode;
-									}
-									if (state.offset) {
-										layer.offset = state.offset;
-									}
-									if (state.locked !== undefined) {
-										layer.locked = state.locked;
-									}
-								}
-							}
-						}
-						tex.updateLayerChanges(true);
-						updatePanel();
-					}, 100);
-				}
-			}
-		}
-
-		// Defer cleanup + sync to allow textures to finish loading
-		setTimeout(function () {
-			// Clean up stale references for all loaded textures
-			for (var texUUID in perTextureData) {
-				var tex = Texture.all.find(function (t) { return t.uuid === texUUID; });
-				if (tex) cleanupStaleRefs(tex);
-			}
-			syncLayerOrder();
-		}, 250);
+		// Defer sync to allow textures to finish loading
+		setTimeout(function () { syncLayerOrder(); }, 250);
 		updatePanel();
 	}
 
@@ -2596,30 +2189,11 @@
 		_saveDebounce = setTimeout(saveLmpToLocalStorage, 300);
 	}
 
-	// Reverse-index cache: uuid → groupName (rebuilt on demand)
-	var _groupRevCache = null;
-	var _groupRevCacheTexUUID = null;
-
-	function _invalidateGroupCache() { _groupRevCache = null; }
-
-	function _buildGroupRevCache() {
-		var tex = getSelectedTexture();
-		var texUUID = tex ? tex.uuid : null;
-		if (_groupRevCache && _groupRevCacheTexUUID === texUUID) return _groupRevCache;
-		_groupRevCache = {};
-		_groupRevCacheTexUUID = texUUID;
-		var groups = _groups();
-		for (var name in groups) {
-			var members = groups[name];
-			for (var i = 0; i < members.length; i++) {
-				_groupRevCache[members[i]] = name;
-			}
-		}
-		return _groupRevCache;
-	}
-
 	function getLayerGroupName(uuid) {
-		return _buildGroupRevCache()[uuid] || null;
+		for (var name in _groups()) {
+			if (_groups()[name].indexOf(uuid) !== -1) return name;
+		}
+		return null;
 	}
 
 	function buildPanelComponent() {
@@ -2686,7 +2260,7 @@
 					<div v-if="hasTexture && hasLayers" class="lmp-layer-list">\
 						<template v-for="item in layerTree">\
 							\
-							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name) }">\
+							<div v-if="item.type === \'group\'" :key="\'g-\' + item.name" class="lmp-group" :class="{ collapsed: isCollapsed(item.name), \'mask-editing\': isGroupMaskEditing(item.name) }">\
 								<div class="lmp-group-header"\
 									draggable="true"\
 									@click="toggleCollapse(item.name)"\
@@ -2714,11 +2288,6 @@
 									<button @click.stop="deleteGroup(item.name)" title="Delete group" class="lmp-grp-btn">\
 										<i class="material-icons">close</i>\
 									</button>\
-								</div>\
-								<div v-if="!isCollapsed(item.name)" class="lmp-group-opacity">\
-									<label>Opacity</label>\
-									<input type="range" min="0" max="100" step="1" :value="getGroupOpacity(item.name)" @input="setGroupOpacity(item.name, $event)" />\
-									<span>{{ getGroupOpacity(item.name) }}%</span>\
 								</div>\
 								<div v-if="!isCollapsed(item.name)" class="lmp-group-body"\
 									@dragover.prevent.stop="dragOverGroupBody($event, item.name)"\
@@ -2936,13 +2505,10 @@
 							untracked.push(l);
 						}
 					});
-					if (untracked.length > 0) {
-						// Add untracked layers to treeOrder AFTER the last existing entry
-						// to preserve group positions (append instead of prepend)
-						for (var u = 0; u < untracked.length; u++) {
-							tree.push({ type: 'layer', layer: untracked[u] });
-							to.push(untracked[u].uuid);
-						}
+					// Prepend in correct visual order (reverse iterate + unshift)
+					for (var u = untracked.length - 1; u >= 0; u--) {
+						tree.unshift({ type: 'layer', layer: untracked[u] });
+						to.unshift(untracked[u].uuid);
 					}
 
 					return tree;
@@ -3077,37 +2643,6 @@
 							}
 						} : null,
 						'_',
-						(function () {
-							var otherTextures = Texture.all.filter(function (t) {
-								var cur = getSelectedTexture();
-								return cur && t.uuid !== cur.uuid;
-							});
-							if (otherTextures.length === 0) return null;
-							return {
-								name: 'Copy to...',
-								icon: 'content_copy',
-								children: otherTextures.map(function (t) {
-									return {
-										name: t.name || 'Texture',
-										icon: 'image',
-										click: function () {
-											copyLayerToTexture(layer, t);
-											Blockbench.showQuickMessage('Layer copied to ' + (t.name || 'texture'), 1500);
-											self.tick++;
-										}
-									};
-								})
-							};
-						})(),
-						'_',
-						{
-							name: 'Merge Down',
-							icon: 'vertical_align_bottom',
-							click: function () {
-								mergeDown();
-								self.tick++;
-							}
-						},
 						{
 							name: 'Delete',
 							icon: 'delete',
@@ -3197,14 +2732,7 @@
 				mergeVisible: mergeVisibleLayers,
 				flattenAll: flattenAllLayers,
 				createGroup: function () {
-					var uuids = [];
-					if (multiSelected.size > 0) {
-						multiSelected.forEach(function (uid) { uuids.push(uid); });
-					} else {
-						var sel = getSelectedLayer();
-						if (sel) uuids.push(sel.uuid);
-					}
-					createLayerGroup(null, uuids);
+					createLayerGroup();
 				},
 				selectLayer: function (layer, event) {
 					// Exit mask edit mode when selecting a different layer
@@ -3304,13 +2832,25 @@
 					return m ? m.enabled : false;
 				},
 				toggleGrpMask: function (name) {
-					// Click on group mask thumbnail → toggle enabled/disabled
-					toggleGroupMaskEnabled(name);
+					// Click on group mask thumbnail → enter edit mode
+					if (maskEditMode.active && maskEditMode.groupName === name) {
+						exitMaskEdit();
+					} else {
+						var grp = _groups()[name];
+						if (grp && grp.length > 0) {
+							var layer = findLayerByUUID(grp[0]);
+							if (layer) enterMaskEdit(layer, name);
+						}
+					}
 					this.tick++;
 				},
 				isMaskEditing: function (layer) {
 					this.tick;
 					return maskEditMode.active && maskEditMode.layerUUID === layer.uuid;
+				},
+				isGroupMaskEditing: function (name) {
+					this.tick;
+					return maskEditMode.active && maskEditMode.groupName === name;
 				},
 				exitMaskEditMode: function () {
 					exitMaskEdit();
@@ -3327,13 +2867,9 @@
 					this.$set(this.collapsed, groupName, !this.collapsed[groupName]);
 				},
 				toggleVis: function (layer) {
-					var tex = getSelectedTexture();
-					if (tex) Undo.initEdit({ textures: [tex] });
 					layer.toggleVisibility();
-					if (tex) {
-						tex.updateLayerChanges(true);
-						Undo.finishEdit('Toggle layer visibility');
-					}
+					var tex = getSelectedTexture();
+					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
 				},
 				toggleLock: function (layer) {
@@ -3352,11 +2888,9 @@
 					if (gn) {
 						var ga = _groups()[gn];
 						if (ga) { var ri = ga.indexOf(layer.uuid); if (ri !== -1) ga.splice(ri, 1); }
-						_invalidateGroupCache();
 					}
 					var ti = _treeOrder().indexOf(layer.uuid);
 					if (ti !== -1) _treeOrder().splice(ti, 1);
-					cleanupLayerResources(layer.uuid);
 					layer.remove(true);
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
@@ -3365,10 +2899,7 @@
 				renameLayer: function (layer) {
 					Blockbench.textPrompt('Rename Layer', layer.name, function (value) {
 						if (value) {
-							var tex = getSelectedTexture();
-							if (tex) Undo.initEdit({ textures: [tex] });
 							layer.name = value;
-							if (tex) Undo.finishEdit('Rename layer');
 							updatePanel();
 						}
 					});
@@ -3378,17 +2909,10 @@
 						if (value && value !== oldName && !_groups()[value]) {
 							_groups()[value] = _groups()[oldName];
 							delete _groups()[oldName];
-							_invalidateGroupCache();
 							// Move group mask to new name
 							if (groupMasks[oldName]) {
 								groupMasks[value] = groupMasks[oldName];
 								delete groupMasks[oldName];
-							}
-							// Move group opacity to new name
-							var td = getTexData();
-							if (td.groupOpacities[oldName] != null) {
-								td.groupOpacities[value] = td.groupOpacities[oldName];
-								delete td.groupOpacities[oldName];
 							}
 							var oi = _treeOrder().indexOf('group:' + oldName);
 							if (oi !== -1) _treeOrder()[oi] = 'group:' + value;
@@ -3403,13 +2927,9 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					var tex = getSelectedTexture();
-					if (tex) Undo.initEdit({ textures: [tex] });
 					layer.opacity = parseInt(event.target.value, 10);
-					if (tex) {
-						tex.updateLayerChanges(true);
-						Undo.finishEdit('Change layer opacity');
-					}
+					var tex = getSelectedTexture();
+					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
 				},
 				setBlendMode: function (event) {
@@ -3419,13 +2939,9 @@
 						Blockbench.showQuickMessage('Layer is locked', 1500);
 						return;
 					}
-					var tex = getSelectedTexture();
-					if (tex) Undo.initEdit({ textures: [tex] });
 					layer.blend_mode = event.target.value;
-					if (tex) {
-						tex.updateLayerChanges(true);
-						Undo.finishEdit('Change blend mode');
-					}
+					var tex = getSelectedTexture();
+					if (tex) tex.updateLayerChanges(true);
 					this.tick++;
 				},
 				onApplyFilter: function (event) {
@@ -3434,14 +2950,6 @@
 						applyFilter(val);
 						event.target.value = '';
 					}
-					this.tick++;
-				},
-				getGroupOpacity: function (groupName) {
-					this.tick;
-					return getGroupOpacity(groupName);
-				},
-				setGroupOpacity: function (groupName, event) {
-					setGroupOpacity(groupName, parseInt(event.target.value, 10));
 					this.tick++;
 				},
 				toggleGroupVis: function (groupName) {
@@ -3480,6 +2988,22 @@
 							icon: 'gradient',
 							click: function () {
 								addGroupMaskBlack(groupName);
+								self.tick++;
+							}
+						} : null,
+						hasMask ? {
+							name: maskEditMode.active && maskEditMode.groupName === groupName ? 'Exit Mask Edit' : 'Edit Group Mask',
+							icon: 'brush',
+							click: function () {
+								if (maskEditMode.active && maskEditMode.groupName === groupName) {
+									exitMaskEdit();
+								} else {
+									var grp = _groups()[groupName];
+									if (grp && grp.length > 0) {
+										var layer = findLayerByUUID(grp[0]);
+										if (layer) enterMaskEdit(layer, groupName);
+									}
+								}
 								self.tick++;
 							}
 						} : null,
@@ -3523,29 +3047,6 @@
 							}
 						} : null,
 						'_',
-						(function () {
-							var otherTextures = Texture.all.filter(function (t) {
-								var cur = getSelectedTexture();
-								return cur && t.uuid !== cur.uuid;
-							});
-							if (otherTextures.length === 0) return null;
-							return {
-								name: 'Copy to...',
-								icon: 'content_copy',
-								children: otherTextures.map(function (t) {
-									return {
-										name: t.name || 'Texture',
-										icon: 'image',
-										click: function () {
-											copyGroupToTexture(groupName, t);
-											Blockbench.showQuickMessage('Group copied to ' + (t.name || 'texture'), 1500);
-											self.tick++;
-										}
-									};
-								})
-							};
-						})(),
-						'_',
 						{
 							name: 'Delete Group',
 							icon: 'delete',
@@ -3588,7 +3089,6 @@
 					dragInfo.type = 'layer';
 					dragInfo.layerUUID = uuid;
 					dragInfo.sourceGroup = sourceGroup;
-					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'layer:' + uuid);
 					e.target.classList.add('lmp-dragging');
@@ -3596,14 +3096,12 @@
 				startDragGroup: function (e, groupName) {
 					dragInfo.type = 'group';
 					dragInfo.groupName = groupName;
-					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'group:' + groupName);
 				},
 				startDragFilter: function (e, filterId) {
 					dragInfo.type = 'filter';
 					dragInfo.filterId = filterId;
-					dragInfo.dragEl = e.target;
 					e.dataTransfer.effectAllowed = 'move';
 					e.dataTransfer.setData('text/plain', 'filter:' + filterId);
 					e.target.classList.add('lmp-dragging');
@@ -3653,17 +3151,16 @@
 					}
 				},
 				dragEnd: function () {
-					if (dragInfo.dragEl) {
-						dragInfo.dragEl.classList.remove('lmp-dragging');
-					}
 					dragInfo.type = null;
 					dragInfo.layerUUID = null;
 					dragInfo.sourceGroup = null;
 					dragInfo.groupName = null;
 					dragInfo.filterId = null;
-					dragInfo.dragEl = null;
 					this.dropId = null;
 					this.dropPos = null;
+					document.querySelectorAll('.lmp-dragging').forEach(function (el) {
+						el.classList.remove('lmp-dragging');
+					});
 					this.tick++;
 				},
 
@@ -3953,10 +3450,6 @@
 				.lmp-grp-btn i { font-size: 15px; }\
 				\
 				/* Group body (contains grouped layers) */\
-				.lmp-group-opacity { display: flex; align-items: center; gap: 4px; padding: 2px 8px; border-top: 1px solid var(--color-border); font-size: 11px; }\
-				.lmp-group-opacity label { opacity: 0.7; min-width: 42px; }\
-				.lmp-group-opacity input[type="range"] { flex: 1; height: 12px; }\
-				.lmp-group-opacity span { min-width: 32px; text-align: right; font-size: 10px; opacity: 0.7; }\
 				.lmp-group-body { padding: 2px 2px 2px 8px; border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-back) 50%, transparent); }\
 				.lmp-group-body .lmp-layer-item { background: transparent; border-color: transparent; margin-bottom: 0; padding-left: 14px; border-left: 2px solid var(--color-border); border-radius: 0 4px 4px 0; }\
 				.lmp-group-body .lmp-layer-item:hover { background: var(--color-button); }\
@@ -3994,6 +3487,9 @@
 				.lmp-mask-edit-bar span { flex: 1; }\
 				.lmp-layer-item.mask-editing { border-color: #e65100 !important; background: color-mix(in srgb, #e65100 25%, var(--color-back)) !important; }\
 				.lmp-layer-item.mask-editing .lmp-mask-thumb { border-color: #e65100; box-shadow: 0 0 4px #e65100; }\
+				.lmp-group.mask-editing { border-color: #e65100 !important; }\
+				.lmp-group.mask-editing .lmp-group-header { background: color-mix(in srgb, #e65100 30%, var(--color-button)); }\
+				.lmp-group.mask-editing .lmp-mask-thumb-sm { border-color: #e65100; box-shadow: 0 0 4px #e65100; }\
 				\
 				/* Drag & Drop */\
 				.lmp-drag-handle { font-size: 14px; opacity: 0.25; cursor: grab; flex-shrink: 0; transition: opacity 0.12s; }\
@@ -4036,7 +3532,6 @@
 				name: 'Add Layer',
 				description: 'Add a new empty layer to the selected texture',
 				icon: 'add',
-				keybind: new Keybind({ key: 'n', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: addNewLayer,
 			});
@@ -4045,7 +3540,6 @@
 				name: 'Duplicate Layer',
 				description: 'Duplicate the selected layer',
 				icon: 'content_copy',
-				keybind: new Keybind({ key: 'd', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: duplicateSelectedLayer,
 			});
@@ -4054,7 +3548,6 @@
 				name: 'Merge Visible Layers',
 				description: 'Merge all visible layers into one',
 				icon: 'call_merge',
-				keybind: new Keybind({ key: 'e', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: mergeVisibleLayers,
 			});
@@ -4063,7 +3556,6 @@
 				name: 'Flatten All Layers',
 				description: 'Flatten all layers into a single layer',
 				icon: 'layers_clear',
-				keybind: new Keybind({ key: 'f', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: flattenAllLayers,
 			});
@@ -4072,7 +3564,6 @@
 				name: 'Toggle Layer Lock',
 				description: 'Lock or unlock the selected layer',
 				icon: 'lock',
-				keybind: new Keybind({ key: 191 }),
 				condition: { modes: ['paint'] },
 				click: function () {
 					var layer = getSelectedLayer();
@@ -4084,18 +3575,8 @@
 				name: 'Import Image as Layer',
 				description: 'Import an image file as a new layer',
 				icon: 'image',
-				keybind: new Keybind({ key: 'i', ctrl: true, shift: true }),
 				condition: { modes: ['paint'] },
 				click: importImageAsLayer,
-			});
-
-			mergeDownAction = new Action('lmp_merge_down', {
-				name: 'Merge Down',
-				description: 'Merge the selected layer into the layer below',
-				icon: 'vertical_align_bottom',
-				keybind: new Keybind({ key: 'e', ctrl: true }),
-				condition: { modes: ['paint'] },
-				click: mergeDown,
 			});
 
 			// Add to texture menu
@@ -4120,15 +3601,8 @@
 			codecParseCb = function (e) {
 				if (e.model && e.model.layer_manager_pro) {
 					deserializeLmpData(e.model.layer_manager_pro);
-					// Defer cleanup + filter reapplication until textures are fully loaded
-					setTimeout(function () {
-						for (var texUUID in perTextureData) {
-							var tex = Texture.all.find(function (t) { return t.uuid === texUUID; });
-							if (tex) cleanupStaleRefs(tex);
-						}
-						syncLayerOrder();
-						reapplyAllFilterStacks();
-					}, 300);
+					// Defer filter reapplication until textures are fully loaded
+					setTimeout(reapplyAllFilterStacks, 200);
 				} else {
 					clearLmpData();
 				}
@@ -4161,33 +3635,18 @@
 				if (maskEditMode.active) exitMaskEdit();
 				updatePanel();
 			}
-			// On undo/redo: clean up stale refs since layer UUIDs may have changed
-			function onUndoRedo() {
-				var tex = getSelectedTexture();
-				if (tex && tex.layers_enabled) {
-					cleanupStaleRefs(tex);
-					syncLayerOrder();
-				}
-				updatePanel();
-			}
 			// Events that should exit mask edit mode (texture switch)
 			['select_texture', 'update_texture_selection'].forEach(function (evt) {
 				Blockbench.on(evt, onTexSwitch);
 				eventListeners.push({ event: evt, fn: onTexSwitch });
 			});
-			// Undo/redo need special handling to fix stale group references
-			['undo', 'redo'].forEach(function (evt) {
-				Blockbench.on(evt, onUndoRedo);
-				eventListeners.push({ event: evt, fn: onUndoRedo });
-			});
 			// Other events just update the panel
-			['add_texture', 'finish_edit', 'select_mode', 'update_selection'].forEach(function (evt) {
+			['add_texture', 'finish_edit', 'undo', 'redo', 'select_mode', 'update_selection'].forEach(function (evt) {
 				Blockbench.on(evt, onUpdate);
 				eventListeners.push({ event: evt, fn: onUpdate });
 			});
 
 			// Periodic fallback update to catch any missed state changes
-			if (updateInterval) clearInterval(updateInterval);
 			updateInterval = setInterval(function () {
 				updatePanel();
 			}, 500);
@@ -4263,14 +3722,12 @@
 			if (flattenLayersAction) flattenLayersAction.delete();
 			if (toggleLockAction) toggleLockAction.delete();
 			if (importLayerAction) importLayerAction.delete();
-			if (mergeDownAction) mergeDownAction.delete();
 
 			MenuBar.removeAction('texture.lmp_add_layer');
 			MenuBar.removeAction('texture.lmp_duplicate_layer');
 			MenuBar.removeAction('texture.lmp_import_layer');
 			MenuBar.removeAction('texture.lmp_merge_visible');
 			MenuBar.removeAction('texture.lmp_flatten_layers');
-			MenuBar.removeAction('texture.lmp_merge_down');
 			MenuBar.removeAction('texture.lmp_toggle_lock');
 
 			clearLmpData();
