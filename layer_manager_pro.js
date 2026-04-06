@@ -17,16 +17,16 @@
 
 	// Per-texture data: groups, tree order, and locks (independent per texture)
 	// treeOrder entries: 'group:Name' for groups, 'uuid' for ungrouped layers
-	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set } }
+	const perTextureData = {}; // { textureUUID: { groups: {}, treeOrder: [], locks: Set, collapsed: {} } }
 
 	function getTexData(texUUID) {
 		if (!texUUID) {
 			var tex = getSelectedTexture();
-			if (!tex) return { groups: {}, treeOrder: [], locks: new Set() };
+			if (!tex) return { groups: {}, treeOrder: [], locks: new Set(), collapsed: {} };
 			texUUID = tex.uuid;
 		}
 		if (!perTextureData[texUUID]) {
-			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set() };
+			perTextureData[texUUID] = { groups: {}, treeOrder: [], locks: new Set(), collapsed: {} };
 		}
 		return perTextureData[texUUID];
 	}
@@ -35,6 +35,12 @@
 	function _groups() { return getTexData().groups; }
 	function _treeOrder() { return getTexData().treeOrder; }
 	function _locks() { return getTexData().locks; }
+	function _collapsed() { return getTexData().collapsed; }
+
+	function getGroupOpacity(groupName) { var g = _groups()[groupName]; return g ? (g.opacity != null ? g.opacity : 100) : 100; }
+	function setGroupOpacity(groupName, value) { var g = _groups()[groupName]; if (g) { g.opacity = value; } }
+	function getGroupBlendMode(groupName) { var g = _groups()[groupName]; return g ? (g.blend_mode || 'default') : 'default'; }
+	function setGroupBlendMode(groupName, value) { var g = _groups()[groupName]; if (g) { g.blend_mode = value; } }
 
 	// Move any entry (group or layer) in the treeOrder
 	function moveTreeEntry(entry, direction) {
@@ -745,14 +751,14 @@
 		if (!name) {
 			Blockbench.textPrompt('New Layer Group', 'Group 1', function (value) {
 				if (value && !_groups()[value]) {
-					_groups()[value] = [];
+					_groups()[value] = { uuids: [], opacity: 100, blend_mode: 'default' };
 					_treeOrder().unshift('group:' + value);
 					Blockbench.showQuickMessage('Created group: ' + value, 1500);
 					updatePanel();
 				}
 			});
 		} else if (!_groups()[name]) {
-			_groups()[name] = [];
+			_groups()[name] = { uuids: [], opacity: 100, blend_mode: 'default' };
 			_treeOrder().unshift('group:' + name);
 			updatePanel();
 		}
@@ -760,8 +766,8 @@
 
 	function addLayerToGroup(groupName, layerUUID) {
 		if (!_groups()[groupName]) return;
-		if (_groups()[groupName].indexOf(layerUUID) === -1) {
-			_groups()[groupName].push(layerUUID);
+		if (_groups()[groupName].uuids.indexOf(layerUUID) === -1) {
+			_groups()[groupName].uuids.push(layerUUID);
 		}
 		// Remove from treeOrder top-level (now inside a group)
 		var ti = _treeOrder().indexOf(layerUUID);
@@ -772,9 +778,10 @@
 
 	function removeLayerFromGroup(groupName, layerUUID) {
 		if (!_groups()[groupName]) return;
-		const idx = _groups()[groupName].indexOf(layerUUID);
-		if (idx !== -1) {
-			_groups()[groupName].splice(idx, 1);
+		var grp = _groups()[groupName];
+		if (grp) {
+			var idx = grp.uuids.indexOf(layerUUID);
+			if (idx !== -1) grp.uuids.splice(idx, 1);
 		}
 		// Add back to treeOrder if not in any other group
 		if (!getLayerGroupName(layerUUID)) {
@@ -1953,6 +1960,7 @@
 					groups: JSON.parse(JSON.stringify(td.groups)),
 					treeOrder: td.treeOrder.slice(),
 					locks: Array.from(td.locks),
+					collapsed: JSON.parse(JSON.stringify(td.collapsed)),
 				};
 			}
 		}
@@ -2030,6 +2038,11 @@
 		}
 		if (src.locks && Array.isArray(src.locks)) {
 			src.locks.forEach(function (uuid) { td.locks.add(uuid); });
+		}
+		if (src.collapsed && typeof src.collapsed === 'object') {
+			for (var name in src.collapsed) {
+				td.collapsed[name] = !!src.collapsed[name];
+			}
 		}
 	}
 
@@ -2861,10 +2874,12 @@
 					return getMaskPreviewDataURL(groupMasks[name]);
 				},
 				isCollapsed: function (groupName) {
-					return !!this.collapsed[groupName];
+					return !!_collapsed()[groupName];
 				},
 				toggleCollapse: function (groupName) {
-					this.$set(this.collapsed, groupName, !this.collapsed[groupName]);
+					_collapsed()[groupName] = !_collapsed()[groupName];
+					updatePanel();
+				},
 				},
 				toggleVis: function (layer) {
 					layer.toggleVisibility();
