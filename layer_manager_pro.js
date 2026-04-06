@@ -250,7 +250,7 @@
 		// Apply mask to all layers in the group
 		var grp = _groups()[groupName];
 		if (grp) {
-			grp.forEach(function (uuid) {
+			grp.uuids.forEach(function (uuid) {
 				var layer = findLayerByUUID(uuid);
 				if (layer) applyMaskToLayer(layer);
 			});
@@ -272,7 +272,7 @@
 		groupMasks[groupName] = { canvas: c, ctx: ctx, enabled: true };
 		var grp = _groups()[groupName];
 		if (grp) {
-			grp.forEach(function (uuid) {
+			grp.uuids.forEach(function (uuid) {
 				var layer = findLayerByUUID(uuid);
 				if (layer) applyMaskToLayer(layer);
 			});
@@ -523,6 +523,104 @@
 	const layerFilterStacks = {};
 	let filterIdCounter = 0;
 
+	// ---- Group Composite System (for real-time group opacity/blend) ----
+	// groupComposites[groupName] = { canvas, composite_layer_uuid, original_uuids: [...] }
+	const groupComposites = {};
+
+	const blendModeMap = {
+		default: 'source-over', multiply: 'multiply', screen: 'screen',
+		overlay: 'overlay', color: 'source-over', difference: 'difference',
+		add: 'lighter', darken: 'darken', lighten: 'lighten', set_opacity: 'source-atop',
+	};
+
+	function renderGroupComposite(groupName) {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return null;
+		var grp = _groups()[groupName];
+		if (!grp || grp.uuids.length === 0) return null;
+		var w = tex.width || (tex.layers[0] && tex.layers[0].canvas.width) || 16;
+		var h = tex.height || (tex.layers[0] && tex.layers[0].canvas.height) || 16;
+		var canvas = document.createElement('canvas');
+		canvas.width = w; canvas.height = h;
+		var ctx = canvas.getContext('2d');
+		var groupOpacity = (grp.opacity != null ? grp.opacity : 100) / 100;
+		var groupBlend = blendModeMap[grp.blend_mode] || 'source-over';
+		ctx.globalCompositeOperation = groupBlend;
+		// Apply group opacity to each member
+		for (var i = 0; i < grp.uuids.length; i++) {
+			var uuid = grp.uuids[i];
+			var layer = findLayerByUUID(uuid);
+			if (!layer) continue;
+			var layerOpacity = (layer.opacity != null ? layer.opacity : 100) / 100;
+			ctx.globalAlpha = layerOpacity * groupOpacity;
+			var layerBlend = blendModeMap[layer.blend_mode] || 'source-over';
+			ctx.globalCompositeOperation = layerBlend;
+			ctx.imageSmoothingEnabled = false;
+			ctx.drawImage(layer.canvas, layer.offset[0], layer.offset[1], layer.scaled_width, layer.scaled_height);
+		}
+		ctx.globalAlpha = 1;
+		ctx.globalCompositeOperation = 'source-over';
+		return canvas;
+	}
+
+	function recomputeGroupComposite(groupName) {
+		var grp = _groups()[groupName];
+		if (!grp || grp.uuids.length === 0) {
+			// Remove composite if group is empty
+			if (groupComposites[groupName]) {
+				delete groupComposites[groupName];
+			}
+			return;
+		}
+		var canvas = renderGroupComposite(groupName);
+		var tex = getSelectedTexture();
+		if (!canvas || !tex) return;
+		var existing = groupComposites[groupName];
+		if (existing && existing.composite_layer_uuid) {
+			// Update existing composite layer's canvas
+			var layer = findLayerByUUID(existing.composite_layer_uuid);
+			if (layer && layer.canvas) {
+				layer.canvas.width = canvas.width;
+				layer.canvas.height = canvas.height;
+				layer.ctx.clearRect(0, 0, canvas.width, canvas.height);
+				layer.ctx.drawImage(canvas, 0, 0);
+				tex.updateLayerChanges(false);
+			}
+		}
+		updatePanel();
+	}
+
+	function getGroupCompositeLayer(groupName) {
+		var existing = groupComposites[groupName];
+		if (existing && existing.composite_layer_uuid) {
+			return findLayerByUUID(existing.composite_layer_uuid);
+		}
+		return null;
+	}
+
+	function createGroupCompositeLayer(groupName) {
+		var tex = getSelectedTexture();
+		if (!tex || !tex.layers_enabled) return null;
+		var grp = _groups()[groupName];
+		if (!grp || grp.uuids.length === 0) return null;
+		var canvas = renderGroupComposite(groupName);
+		if (!canvas) return null;
+		var compositeLayer = new TextureLayer({ name: groupName }, tex);
+		compositeLayer.canvas.width = canvas.width;
+		compositeLayer.canvas.height = canvas.height;
+		compositeLayer.ctx.drawImage(canvas, 0, 0);
+		compositeLayer.is_group_composite = true;
+		compositeLayer.group_composite_name = groupName;
+		compositeLayer.original_uuids = grp.uuids.slice();
+		groupComposites[groupName] = {
+			canvas: canvas,
+			composite_layer_uuid: compositeLayer.uuid,
+			original_uuids: grp.uuids.slice(),
+		};
+		compositeLayer.addForEditing();
+		return compositeLayer;
+	}
+
 	function getFilterStack(layerUUID) {
 		if (!layerFilterStacks[layerUUID]) {
 			layerFilterStacks[layerUUID] = { original: null, filters: [] };
@@ -684,20 +782,40 @@
 
 	// Sync tex.layers order to match treeOrder display
 	// treeOrder is top-to-bottom (visual), tex.layers is bottom-to-top (render)
+	// Groups with non-default opacity/blend are rendered as a composite layer
 	function syncLayerOrder() {
 		var tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return;
 		var to = _treeOrder();
 		// Build ordered list: walk treeOrder top-to-bottom, expanding groups
 		var orderedUUIDs = [];
+		// Tracks which original member uuids are hidden (inside effect groups)
+		var hiddenUUIDs = new Set();
 		for (var i = 0; i < to.length; i++) {
 			var entry = to[i];
 			if (entry.indexOf('group:') === 0) {
 				var name = entry.slice(6);
-				var members = _groups()[name];
-				if (members) {
-					for (var j = 0; j < members.length; j++) {
-						orderedUUIDs.push(members[j]);
+				var grp = _groups()[name];
+				if (grp && grp.uuids.length > 0) {
+					var hasEffects = grp.opacity != null && grp.opacity < 100 || grp.blend_mode && grp.blend_mode !== 'default';
+					if (hasEffects) {
+						// Create or update composite layer for this group
+						var compositeLayer = getGroupCompositeLayer(name);
+						if (!compositeLayer) {
+							compositeLayer = createGroupCompositeLayer(name);
+						} else {
+							recomputeGroupComposite(name);
+						}
+						if (compositeLayer) {
+							orderedUUIDs.push(compositeLayer.uuid);
+							grp.uuids.forEach(function (uuid) { hiddenUUIDs.add(uuid); });
+						}
+					} else {
+						// No effects: expand members normally, remove any stale composite
+						if (groupComposites[name]) delete groupComposites[name];
+						for (var j = 0; j < grp.uuids.length; j++) {
+							orderedUUIDs.push(grp.uuids[j]);
+						}
 					}
 				}
 			} else {
@@ -716,9 +834,11 @@
 				delete layerMap[orderedUUIDs[i]];
 			}
 		}
-		// Append any layers not in treeOrder (safety)
+		// Append any layers not in treeOrder (safety), excluding hidden group members
 		for (var uuid in layerMap) {
-			newLayers.push(layerMap[uuid]);
+			if (!hiddenUUIDs.has(uuid)) {
+				newLayers.push(layerMap[uuid]);
+			}
 		}
 		tex.layers.length = 0;
 		for (var i = 0; i < newLayers.length; i++) {
@@ -799,8 +919,11 @@
 	function deleteLayerGroup(groupName) {
 		// Move group's layers back to treeOrder at the group's position
 		var gi = _treeOrder().indexOf('group:' + groupName);
-		var members = (_groups()[groupName] || []).slice();
+		var members = (_groups()[groupName] ? _groups()[groupName].uuids.slice() : []);
 		delete _groups()[groupName];
+		if (_collapsed()[groupName] !== undefined) {
+			delete _collapsed()[groupName];
+		}
 		if (gi !== -1) {
 			_treeOrder().splice(gi, 1);
 			// Insert members where the group was
@@ -815,7 +938,7 @@
 	function toggleGroupVisibility(groupName) {
 		const tex = getSelectedTexture();
 		if (!tex || !tex.layers_enabled) return;
-		const uuids = _groups()[groupName] || [];
+		const uuids = _groups()[groupName] ? _groups()[groupName].uuids : [];
 		const layers = tex.layers.filter(function (l) {
 			return uuids.indexOf(l.uuid) !== -1;
 		});
@@ -830,7 +953,8 @@
 	}
 
 	function isGroupLocked(groupName) {
-		var uuids = _groups()[groupName] || [];
+		var g = _groups()[groupName];
+		var uuids = g ? g.uuids : [];
 		if (uuids.length === 0) return false;
 		for (var i = 0; i < uuids.length; i++) {
 			if (!_locks().has(uuids[i])) return false;
@@ -839,7 +963,8 @@
 	}
 
 	function toggleGroupLock(groupName) {
-		var uuids = _groups()[groupName] || [];
+		var g = _groups()[groupName];
+		var uuids = g ? g.uuids : [];
 		if (uuids.length === 0) return;
 		var locked = isGroupLocked(groupName);
 		uuids.forEach(function (uuid) {
@@ -913,8 +1038,8 @@
 		if (origGroup) {
 			var grpArr = _groups()[origGroup];
 			if (grpArr) {
-				var oi = grpArr.indexOf(layer.uuid);
-				grpArr.splice(oi + 1, 0, newLayer.uuid);
+				var oi = grpArr.uuids.indexOf(layer.uuid);
+				grpArr.uuids.splice(oi + 1, 0, newLayer.uuid);
 			}
 		} else {
 			var oi = _treeOrder().indexOf(layer.uuid);
@@ -968,7 +1093,7 @@
 			var vg = getLayerGroupName(vuuid);
 			if (vg) {
 				var ga = _groups()[vg];
-				if (ga) { var ri = ga.indexOf(vuuid); if (ri !== -1) ga.splice(ri, 1); }
+				if (ga) { var ri = ga.uuids.indexOf(vuuid); if (ri !== -1) ga.uuids.splice(ri, 1); }
 			}
 			var ti = _treeOrder().indexOf(vuuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
@@ -1014,7 +1139,7 @@
 			var gn = getLayerGroupName(uuid);
 			if (gn) {
 				var ga = _groups()[gn];
-				if (ga) { var ri = ga.indexOf(uuid); if (ri !== -1) ga.splice(ri, 1); }
+				if (ga) { var ri = ga.uuids.indexOf(uuid); if (ri !== -1) ga.uuids.splice(ri, 1); }
 			}
 			var ti = _treeOrder().indexOf(uuid);
 			if (ti !== -1) _treeOrder().splice(ti, 1);
@@ -2018,7 +2143,11 @@
 	function _loadTexDataFromSrc(td, src) {
 		if (src.groups) {
 			for (var name in src.groups) {
-				td.groups[name] = src.groups[name].slice();
+				td.groups[name] = {
+					uuids: (src.groups[name].uuids || []).slice(),
+					opacity: src.groups[name].opacity != null ? src.groups[name].opacity : 100,
+					blend_mode: src.groups[name].blend_mode || 'default'
+				};
 			}
 		}
 		if (src.treeOrder && Array.isArray(src.treeOrder)) {
@@ -2114,7 +2243,7 @@
 						// Re-apply to layers in this group
 						var grp = _groups()[gName];
 						if (grp) {
-							grp.forEach(function (uuid) {
+							grp.uuids.forEach(function (uuid) {
 								var layer = findLayerByUUID(uuid);
 								if (layer) {
 									setTimeout(function () { applyMaskToLayer(layer); }, 400);
@@ -2204,7 +2333,7 @@
 
 	function getLayerGroupName(uuid) {
 		for (var name in _groups()) {
-			if (_groups()[name].indexOf(uuid) !== -1) return name;
+			if (_groups()[name].uuids.indexOf(uuid) !== -1) return name;
 		}
 		return null;
 	}
@@ -2480,7 +2609,7 @@
 							var groupLayers = [];
 							var allVisible = true;
 							var allLocked = true;
-							var memberUUIDs = _groups()[name] || [];
+							var memberUUIDs = _groups()[name] ? _groups()[name].uuids : [];
 							memberUUIDs.forEach(function (uuid) {
 								var l = layerMap[uuid];
 								if (l) {
@@ -2850,8 +2979,8 @@
 						exitMaskEdit();
 					} else {
 						var grp = _groups()[name];
-						if (grp && grp.length > 0) {
-							var layer = findLayerByUUID(grp[0]);
+						if (grp && grp.uuids.length > 0) {
+							var layer = findLayerByUUID(grp.uuids[0]);
 							if (layer) enterMaskEdit(layer, name);
 						}
 					}
@@ -2902,7 +3031,7 @@
 					var gn = getLayerGroupName(layer.uuid);
 					if (gn) {
 						var ga = _groups()[gn];
-						if (ga) { var ri = ga.indexOf(layer.uuid); if (ri !== -1) ga.splice(ri, 1); }
+						if (ga) { var ri = ga.uuids.indexOf(layer.uuid); if (ri !== -1) ga.uuids.splice(ri, 1); }
 					}
 					var ti = _treeOrder().indexOf(layer.uuid);
 					if (ti !== -1) _treeOrder().splice(ti, 1);
@@ -2925,10 +3054,14 @@
 							_groups()[value] = _groups()[oldName];
 							delete _groups()[oldName];
 							// Move group mask to new name
-							if (groupMasks[oldName]) {
-								groupMasks[value] = groupMasks[oldName];
+								if (groupMasks[oldName]) {
+									groupMasks[value] = groupMasks[oldName];
 								delete groupMasks[oldName];
-							}
+								}
+								if (_collapsed()[oldName] !== undefined) {
+									_collapsed()[value] = _collapsed()[oldName];
+								delete _collapsed()[oldName];
+								}
 							var oi = _treeOrder().indexOf('group:' + oldName);
 							if (oi !== -1) _treeOrder()[oi] = 'group:' + value;
 							updatePanel();
@@ -3014,7 +3147,7 @@
 									exitMaskEdit();
 								} else {
 									var grp = _groups()[groupName];
-									if (grp && grp.length > 0) {
+									if (grp && grp.uuids.length > 0) {
 										var layer = findLayerByUUID(grp[0]);
 										if (layer) enterMaskEdit(layer, groupName);
 									}
@@ -3235,7 +3368,7 @@
 								var sg = getLayerGroupName(dragUUID);
 								if (sg) {
 									var srcArr = _groups()[sg];
-									if (srcArr) { var si = srcArr.indexOf(dragUUID); if (si !== -1) srcArr.splice(si, 1); }
+									if (srcArr) { var si = srcArr.uuids.indexOf(dragUUID); if (si !== -1) srcArr.uuids.splice(si, 1); }
 								}
 								var fi = _treeOrder().indexOf(dragUUID);
 								if (fi !== -1) _treeOrder().splice(fi, 1);
@@ -3320,8 +3453,8 @@
 					if (sourceGroup) {
 						var srcArr = _groups()[sourceGroup];
 						if (srcArr) {
-							var si = srcArr.indexOf(dragUUID);
-							if (si !== -1) srcArr.splice(si, 1);
+							var si = srcArr.uuids.indexOf(dragUUID);
+						if (si !== -1) srcArr.uuids.splice(si, 1);
 						}
 					}
 
@@ -3329,12 +3462,12 @@
 						// Dropping onto a layer inside a group: reorder within group
 						var tgtArr = _groups()[targetGroup];
 						if (!tgtArr) return;
-						var ei = tgtArr.indexOf(dragUUID);
-						if (ei !== -1) tgtArr.splice(ei, 1);
-						var ti = tgtArr.indexOf(targetUUID);
+						var ei = tgtArr.uuids.indexOf(dragUUID);
+						if (ei !== -1) tgtArr.uuids.splice(ei, 1);
+						var ti = tgtArr.uuids.indexOf(targetUUID);
 						if (ti === -1) ti = tgtArr.length - 1;
 						if (position === 'after') ti++;
-						tgtArr.splice(ti, 0, dragUUID);
+						tgtArr.uuids.splice(ti, 0, dragUUID);
 						// Remove from treeOrder top-level (now inside group)
 						var fi = _treeOrder().indexOf(dragUUID);
 						if (fi !== -1) _treeOrder().splice(fi, 1);
@@ -3364,8 +3497,8 @@
 					if (sourceGroup) {
 						var srcArr = _groups()[sourceGroup];
 						if (srcArr) {
-							var si = srcArr.indexOf(dragUUID);
-							if (si !== -1) srcArr.splice(si, 1);
+							var si = srcArr.uuids.indexOf(dragUUID);
+							if (si !== -1) srcArr.uuids.splice(si, 1);
 						}
 					}
 					// Remove from treeOrder top-level
@@ -3374,8 +3507,8 @@
 					// Add to target group
 					var tgtArr = _groups()[targetGroup];
 					if (!tgtArr) return;
-					if (tgtArr.indexOf(dragUUID) === -1) {
-						tgtArr.push(dragUUID);
+				if (tgtArr.uuids.indexOf(dragUUID) === -1) {
+					tgtArr.uuids.push(dragUUID);
 					}
 					syncLayerOrder();
 					updatePanel();
