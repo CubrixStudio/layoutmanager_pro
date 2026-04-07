@@ -38,9 +38,9 @@
 	function _collapsed() { return getTexData().collapsed; }
 
 	function getGroupOpacity(groupName) { var g = _groups()[groupName]; return g ? (g.opacity != null ? g.opacity : 100) : 100; }
-	function setGroupOpacity(groupName, value) { var g = _groups()[groupName]; if (g) { g.opacity = value; } }
+	function setGroupOpacity(groupName, value) { var g = _groups()[groupName]; if (g) { g.opacity = value; recomputeGroupComposite(groupName); } }
 	function getGroupBlendMode(groupName) { var g = _groups()[groupName]; return g ? (g.blend_mode || 'default') : 'default'; }
-	function setGroupBlendMode(groupName, value) { var g = _groups()[groupName]; if (g) { g.blend_mode = value; } }
+	function setGroupBlendMode(groupName, value) { var g = _groups()[groupName]; if (g) { g.blend_mode = value; recomputeGroupComposite(groupName); } }
 
 	// Move any entry (group or layer) in the treeOrder
 	function moveTreeEntry(entry, direction) {
@@ -949,6 +949,7 @@
 			l.visible = newState;
 		});
 		tex.updateLayerChanges(true);
+		syncLayerOrder();
 		updatePanel();
 	}
 
@@ -1150,6 +1151,7 @@
 		_treeOrder().unshift(merged.uuid);
 		multiSelected.clear();
 		Undo.finishEdit('Merge selected layers');
+		syncLayerOrder();
 		tex.updateLayerChanges(true);
 		updatePanel();
 	}
@@ -1225,14 +1227,14 @@
 					layer.ctx.drawImage(img, 0, 0);
 					layer.addForEditing();
 					_treeOrder().unshift(layer.uuid);
-
+					syncLayerOrder();
 					Undo.finishEdit('Import image as layer');
 					tex.updateLayerChanges(true);
 					updatePanel();
-				};
-				img.src = file.content;
-			}
-		);
+					};
+					img.src = file.content;
+				}
+			);
 	}
 
 	// ---- Edit in External Editor (Photoshop link) ----
@@ -1845,6 +1847,7 @@
 			}
 
 			tex.updateLayerChanges(true);
+			syncLayerOrder();
 			updatePanel();
 			Blockbench.showQuickMessage('Layers synced from PSD (' + parsed.layers.length + ' layers)', 1500);
 		} catch (e) {
@@ -2129,6 +2132,20 @@
 				}
 				return out;
 			})(),
+			groupComposites: (function () {
+				var out = {};
+				for (var name in groupComposites) {
+					var c = groupComposites[name];
+					if (c && c.canvas) {
+						out[name] = {
+							data: c.canvas.toDataURL('image/png'),
+							composite_layer_uuid: c.composite_layer_uuid,
+							original_uuids: c.original_uuids.slice(),
+						};
+					}
+				}
+				return out;
+			})(),
 		};
 	}
 
@@ -2137,6 +2154,7 @@
 		for (var key in layerFilterStacks) delete layerFilterStacks[key];
 		for (var key in layerMasks) delete layerMasks[key];
 		for (var key in groupMasks) delete groupMasks[key];
+		for (var key in groupComposites) delete groupComposites[key];
 		filterIdCounter = 0;
 	}
 
@@ -2254,6 +2272,36 @@
 					};
 					img.src = mData.data;
 				})(name, data.groupMasks[name]);
+			}
+		}
+
+		// Restore group composites
+		if (data.groupComposites) {
+			for (var name in data.groupComposites) {
+				(function (gName, cData) {
+					var img = new Image();
+					img.onload = function () {
+						var c = document.createElement('canvas');
+						c.width = img.width; c.height = img.height;
+						var ctx = c.getContext('2d');
+						ctx.drawImage(img, 0, 0);
+						groupComposites[gName] = {
+							canvas: c,
+							composite_layer_uuid: cData.composite_layer_uuid,
+							original_uuids: cData.original_uuids ? cData.original_uuids.slice() : [],
+						};
+						// Update the composite layer's canvas if it exists
+						var compositeLayer = findLayerByUUID(cData.composite_layer_uuid);
+						if (compositeLayer && compositeLayer.canvas) {
+							compositeLayer.canvas.width = c.width;
+							compositeLayer.canvas.height = c.height;
+							compositeLayer.ctx.clearRect(0, 0, c.width, c.height);
+							compositeLayer.ctx.drawImage(c, 0, 0);
+						}
+						updatePanel();
+					};
+					img.src = cData.data;
+				})(name, data.groupComposites[name]);
 			}
 		}
 
@@ -3014,6 +3062,7 @@
 					layer.toggleVisibility();
 					var tex = getSelectedTexture();
 					if (tex) tex.updateLayerChanges(true);
+					syncLayerOrder();
 					this.tick++;
 				},
 				toggleLock: function (layer) {
@@ -3055,11 +3104,16 @@
 							delete _groups()[oldName];
 							// Move group mask to new name
 								if (groupMasks[oldName]) {
-									groupMasks[value] = groupMasks[oldName];
+								groupMasks[value] = groupMasks[oldName];
 								delete groupMasks[oldName];
 								}
+								// Move group composite to new name
+								if (groupComposites[oldName]) {
+								groupComposites[value] = groupComposites[oldName];
+								delete groupComposites[oldName];
+								}
 								if (_collapsed()[oldName] !== undefined) {
-									_collapsed()[value] = _collapsed()[oldName];
+								_collapsed()[value] = _collapsed()[oldName];
 								delete _collapsed()[oldName];
 								}
 							var oi = _treeOrder().indexOf('group:' + oldName);
