@@ -11,7 +11,12 @@
       "Bash(python3:*)",
       "Bash(xxd)",
       "Bash(sed -i -f /tmp/fix_import.sed \"F:\\\\JEtbrain\\\\layoutmanager_pro\\\\layer_manager_pro.js\")",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(node -c layer_manager_pro.js)",
+      "Bash(node -e ':*)",
+      "Bash(node:*)",
+      "Bash(sed -i '3565s/^\\\\t\\\\t\\\\t\\\\t\\\\t\\\\t/\\\\t\\\\t\\\\t\\\\t\\\\t\\\\t/' \"F:\\\\JEtbrain\\\\layoutmanager_pro\\\\layer_manager_pro.js\")",
+      "Bash(sed -n '3562,3572p' \"F:\\\\JEtbrain\\\\layoutmanager_pro\\\\layer_manager_pro.js\")"
     ]
   }
 }

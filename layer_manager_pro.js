@@ -288,7 +288,7 @@
 		if (!mask) return;
 		var grp = _groups()[groupName];
 		if (grp) {
-			grp.forEach(function (uuid) {
+			grp.uuids.forEach(function (uuid) {
 				var layer = findLayerByUUID(uuid);
 				if (layer) {
 					if (apply) {
@@ -311,7 +311,7 @@
 		mask.enabled = !mask.enabled;
 		var grp = _groups()[groupName];
 		if (grp) {
-			grp.forEach(function (uuid) {
+			grp.uuids.forEach(function (uuid) {
 				var layer = findLayerByUUID(uuid);
 				if (layer) applyMaskToLayer(layer);
 			});
@@ -473,7 +473,7 @@
 			// Group mask: re-apply to ALL layers in the group
 			var grp = _groups()[exitGroupName];
 			if (grp) {
-				grp.forEach(function (uuid) {
+				grp.uuids.forEach(function (uuid) {
 					var gl = findLayerByUUID(uuid);
 					if (gl) {
 						// Reset mask originals so they get re-snapshotted
@@ -2686,7 +2686,7 @@
 					var allGroupedUUIDs = new Set();
 					var groups = _groups();
 					for (var gn in groups) {
-						groups[gn].forEach(function (uid) { allGroupedUUIDs.add(uid); });
+						groups[gn].uuids.forEach(function (uid) { allGroupedUUIDs.add(uid); });
 					}
 
 					var untracked = [];
@@ -3057,7 +3057,6 @@
 					_collapsed()[groupName] = !_collapsed()[groupName];
 					updatePanel();
 				},
-				},
 				toggleVis: function (layer) {
 					layer.toggleVisibility();
 					var tex = getSelectedTexture();
@@ -3224,7 +3223,7 @@
 								invertMask(groupMasks[groupName]);
 								var grp = _groups()[groupName];
 								if (grp) {
-									grp.forEach(function (uuid) {
+									grp.uuids.forEach(function (uuid) {
 										var layer = findLayerByUUID(uuid);
 										if (layer) applyMaskToLayer(layer);
 									});
@@ -3561,8 +3560,8 @@
 					// Add to target group
 					var tgtArr = _groups()[targetGroup];
 					if (!tgtArr) return;
-				if (tgtArr.uuids.indexOf(dragUUID) === -1) {
-					tgtArr.uuids.push(dragUUID);
+					if (tgtArr.uuids.indexOf(dragUUID) === -1) {
+						tgtArr.uuids.push(dragUUID);
 					}
 					syncLayerOrder();
 					updatePanel();
