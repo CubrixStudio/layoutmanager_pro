@@ -1,7 +1,7 @@
 {
   "name": "animation-tools-pro",
-  "version": "1.0.0",
-  "description": "Plugin Blockbench pour l'animation : inverser une animation et replacer les keyframes selon un pourcentage de vitesse",
+  "version": "1.1.0",
+  "description": "Plugin Blockbench pour l'animation : reverse, vitesse/stretch, shift, snap fps, ping-pong, loop, easing, nettoyage et miroir gauche/droite",
   "author": "CubrixStudio",
   "license": "MIT",
   "devDependencies": {
