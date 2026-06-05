@@ -1,0 +1,10 @@
+{
+  "name": "animation-tools-pro",
+  "version": "1.0.0",
+  "description": "Plugin Blockbench pour l'animation : inverser une animation et replacer les keyframes selon un pourcentage de vitesse",
+  "author": "CubrixStudio",
+  "license": "MIT",
+  "devDependencies": {
+    "blockbench-types": "^4.10.0"
+  }
+}
