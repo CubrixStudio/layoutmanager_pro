@@ -1,0 +1,10 @@
+{
+  "name": "modeling-helper",
+  "version": "1.0.0",
+  "description": "Plugin Blockbench pour la modélisation : freeze/apply rotation, snap to grid, array/repeat, align & distribute",
+  "author": "CubrixStudio",
+  "license": "MIT",
+  "devDependencies": {
+    "blockbench-types": "^4.10.0"
+  }
+}
