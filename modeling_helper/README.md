@@ -7,18 +7,29 @@ via la recherche d'actions.
 
 ## Fonctionnalités
 
-### ❄️ Freeze Rotation (cuire / appliquer la rotation)
+### ❄️ Freeze Rotation (cuire / reformater la rotation)
 
-Équivalent du « Apply Rotation » de Blender : cuit la rotation d'un élément dans sa
-géométrie pour que le champ **Rotation revienne à `0`** sans que la forme bouge
-visuellement.
+Cuit la rotation d'un élément dans sa géométrie. **Un cube reste toujours un cube**
+(jamais de conversion en mesh) :
 
-- **Cube avec rotation multiple de 90°** (ex. `0, -90, 0`) : recalcule une boîte
-  alignée aux axes équivalente, remappe les faces + UV, et remet la rotation à 0.
-  Le cube reste un cube propre.
-- **Cube avec rotation quelconque** (ex. `30°`) : l'élément est **converti en mesh**
-  (sommets libres) puis la rotation est cuite dans les sommets. Nécessite un format
-  qui supporte les meshes.
+- La **partie multiple de 90°** de chaque axe est cuite dans la géométrie : la boîte
+  alignée aux axes est recalculée, les faces + UV sont remappées.
+- Le **résidu** est snappé à l'angle valide le plus proche parmi
+  **`0`, `±22.5`, `±45`** (les angles autorisés d'un cube en format Java Block Model)
+  et conservé comme rotation du cube.
+
+Exemples :
+
+| Rotation avant | Géométrie cuite | Rotation après | Résultat |
+|---|---|---|---|
+| `-90°` | −90° | `0°` | le cube ne bouge pas, rotation remise à 0 |
+| `45°` | — | `45°` | aucun changement (déjà valide) |
+| `22.5°` | — | `22.5°` | aucun changement (déjà valide) |
+| `30°` | — | `22.5°` | rotation snappée au valide le plus proche |
+| `135°` | 90° | `45°` | cube préservé, visuellement identique |
+
+- **Mesh** : si un mesh est sélectionné, la rotation est cuite dans ses sommets (il
+  reste un mesh).
 - **Groupe / bone** : la rotation du groupe est reportée sur ses enfants directs
   (origin, position et rotation composée), puis la rotation du groupe est remise à 0.
 
@@ -56,10 +67,11 @@ Rechargez le plugin pendant le développement avec **Ctrl/Cmd + J** dans Blockbe
 
 ## Limites connues
 
-- Le remap UV/faces du Freeze orthogonal est pixel-parfait pour les rotations simples ;
-  des combinaisons multi-axes complexes peuvent demander un léger ajustement manuel de
-  la rotation d'une face.
-- La conversion en mesh (rotations non 90°) n'est disponible que dans les formats qui
-  supportent les meshes.
+- Le remap UV/faces du Freeze est pixel-parfait pour les rotations sur un seul axe
+  (le cas courant) ; des combinaisons multi-axes complexes peuvent demander un léger
+  ajustement manuel de la rotation d'une face.
+- Le snapping du résidu suppose une rotation sur un seul axe (contrainte des cubes
+  Java Block Model). Un résidu non standard (ex. `30°`) est ramené à l'angle valide le
+  plus proche, ce qui peut légèrement modifier l'orientation visuelle.
 - **Align & Distribute** utilise la bounding box non tournée (la rotation propre des
   éléments est ignorée pour le calcul des bords).

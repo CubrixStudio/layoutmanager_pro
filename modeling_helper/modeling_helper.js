@@ -48,14 +48,33 @@
 	function isCube(el) { return typeof Cube !== 'undefined' && el instanceof Cube; }
 	function isMesh(el) { return typeof Mesh !== 'undefined' && el instanceof Mesh; }
 
-	// A rotation is "orthogonal" when every axis is a multiple of 90 degrees.
-	function isOrthogonal(rot) {
-		if (!rot) return true;
-		return rot.every(function (a) { return Math.abs(a / 90 - Math.round(a / 90)) < EPS; });
-	}
-
 	function isZeroRotation(rot) {
 		return !rot || rot.every(function (a) { return Math.abs(a) < EPS; });
+	}
+
+	// Valid per-axis rotation angles a cube may keep (Java block-model constraint).
+	var VALID_ANGLES = [-45, -22.5, 0, 22.5, 45];
+
+	// Nearest valid angle to `a`.
+	function snapAngle(a) {
+		var best = VALID_ANGLES[0], bestD = Infinity;
+		VALID_ANGLES.forEach(function (v) {
+			var d = Math.abs(a - v);
+			if (d < bestD) { bestD = d; best = v; }
+		});
+		return best;
+	}
+
+	// Split an angle into a 90°-multiple part (baked into geometry) and a residual
+	// in [-45, 45] that stays as the cube's rotation. Ties at ±45 prefer no baking.
+	function split90(a) {
+		var k = Math.round(a / 90);
+		var residual = a - 90 * k;
+		if (Math.abs(Math.abs(residual) - 45) < EPS) {
+			var kAlt = k + (residual > 0 ? 1 : -1);
+			if (Math.abs(kAlt) < Math.abs(k)) { k = kAlt; residual = a - 90 * k; }
+		}
+		return { rot90: 90 * k, residual: residual };
 	}
 
 	// THREE rotation order used by an element's mesh (fallback 'ZYX', Blockbench default).
@@ -111,10 +130,20 @@
 	//  Feature 1: Freeze Rotation
 	// =====================================================================
 
-	// Bake an orthogonal (90°-multiple) cube rotation into its geometry and faces.
-	function freezeCubeOrthogonal(cube) {
+	// Reformat a cube's rotation while KEEPING it a cube (never a mesh):
+	//  - the 90°-multiple part of each axis is baked into the geometry + faces,
+	//  - the remaining residual is snapped to the nearest valid angle and kept as
+	//    the cube's rotation (e.g. -90 -> baked, rotation 0; 30 -> rotation 22.5).
+	function freezeCubeReformat(cube) {
 		var order = getRotationOrder(cube);
-		var R = rotationMatrix(cube.rotation, order);
+		var rot90 = [0, 0, 0];
+		var residual = [0, 0, 0];
+		for (var ax = 0; ax < 3; ax++) {
+			var s = split90(cube.rotation[ax] || 0);
+			rot90[ax] = s.rot90;
+			residual[ax] = snapAngle(s.residual);
+		}
+		var R = rotationMatrix(rot90, order); // only the 90°-multiple part is baked
 		var origin = cube.origin.slice();
 
 		// Recompute the axis-aligned box from the 8 rotated corners.
@@ -149,7 +178,7 @@
 			if (destKey) newFaceData[destKey] = { data: oldFaces[srcKey], rotDelta: faceRotationDelta(srcKey, destKey, R) };
 		});
 
-		cube.extend({ from: min, to: max, rotation: [0, 0, 0] });
+		cube.extend({ from: min, to: max, rotation: residual });
 		if (cube.box_uv) {
 			// Per-cube (box) UV: geometry drives UV, so just re-map automatically.
 			if (typeof cube.mapAutoUV === 'function') cube.mapAutoUV();
@@ -257,72 +286,37 @@
 		var groups = getSelectedGroups();
 		if (elements.length === 0 && groups.length === 0) { msg('Select a cube, mesh or group first'); return; }
 
-		// Split cubes into orthogonal (bake in place) and arbitrary (need mesh conversion).
-		var orthoCubes = [];
-		var arbitraryCubes = [];
-		var meshes = [];
+		// Cubes stay cubes: reformat every rotated cube (bake 90° part, snap residual).
+		// Meshes stay meshes (bake into vertices). Groups push rotation onto children.
+		var cubes = [], meshes = [];
 		elements.forEach(function (el) {
-			if (isCube(el)) {
-				if (isZeroRotation(el.rotation)) return;
-				if (isOrthogonal(el.rotation)) orthoCubes.push(el); else arbitraryCubes.push(el);
-			} else if (isMesh(el)) {
-				if (!isZeroRotation(el.rotation)) meshes.push(el);
-			}
+			if (isCube(el) && !isZeroRotation(el.rotation)) cubes.push(el);
+			else if (isMesh(el) && !isZeroRotation(el.rotation)) meshes.push(el);
+		});
+		var groupsToFreeze = groups.filter(function (g) { return !isZeroRotation(g.rotation); });
+
+		if (cubes.length === 0 && meshes.length === 0 && groupsToFreeze.length === 0) {
+			msg('Nothing to freeze (no rotation)');
+			return;
+		}
+
+		// Group freezing edits the group's DIRECT child elements too, so include them
+		// in the `elements` aspect; `outliner:true` captures group transforms.
+		var affected = cubes.concat(meshes);
+		groupsToFreeze.forEach(function (g) {
+			(g.children || []).forEach(function (c) {
+				if ((isCube(c) || isMesh(c)) && affected.indexOf(c) === -1) affected.push(c);
+			});
 		});
 
-		var canMesh = (typeof BarItems !== 'undefined' && BarItems.convert_to_mesh);
-		if (arbitraryCubes.length && !canMesh) {
-			msg('Non-90° rotations need mesh support (unavailable in this format)', 2500);
-			arbitraryCubes = [];
-		}
+		Undo.initEdit({ elements: affected, outliner: true });
+		cubes.forEach(freezeCubeReformat);
+		meshes.forEach(freezeMeshRotation);
+		groupsToFreeze.forEach(freezeGroupRotation);
+		Undo.finishEdit('Freeze rotation');
+		refreshCanvas(affected);
 
-		// Phase A — bake orthogonal cubes, meshes and groups in one undo step.
-		if (orthoCubes.length || meshes.length || groups.length) {
-			// Group freezing edits the group's DIRECT child elements too, so include
-			// them in the `elements` aspect; `outliner:true` captures group transforms.
-			var affected = orthoCubes.concat(meshes);
-			groups.forEach(function (g) {
-				(g.children || []).forEach(function (c) {
-					if ((isCube(c) || isMesh(c)) && affected.indexOf(c) === -1) affected.push(c);
-				});
-			});
-			Undo.initEdit({ elements: affected, outliner: true });
-			orthoCubes.forEach(freezeCubeOrthogonal);
-			meshes.forEach(freezeMeshRotation);
-			groups.forEach(freezeGroupRotation);
-			Undo.finishEdit('Freeze rotation');
-			refreshCanvas(affected);
-		}
-
-		// Phase B — arbitrary-rotation cubes need mesh conversion. The built-in
-		// convert_to_mesh action manages its own undo, so it must run OUTSIDE our
-		// undo block; the vertex baking is then its own separate undo step.
-		var converted = 0;
-		if (arbitraryCubes.length) {
-			var before = (typeof Mesh !== 'undefined' && Mesh.all) ? Mesh.all.slice() : [];
-			try {
-				selected.splice(0, selected.length);
-				arbitraryCubes.forEach(function (c) { selected.push(c); });
-				BarItems.convert_to_mesh.trigger(); // own undo entry
-				var newMeshes = ((typeof Mesh !== 'undefined' && Mesh.all) ? Mesh.all : []).filter(function (m) {
-					return before.indexOf(m) === -1;
-				});
-				if (newMeshes.length) {
-					Undo.initEdit({ elements: newMeshes });
-					newMeshes.forEach(function (m) { freezeMeshRotation(m); converted++; });
-					Undo.finishEdit('Freeze rotation (mesh)');
-					refreshCanvas(newMeshes);
-				}
-			} catch (e) {
-				msg('Mesh conversion failed for ' + arbitraryCubes.length + ' cube(s)', 2500);
-			}
-		}
-
-		var total = orthoCubes.length + meshes.length + groups.length + converted;
-		if (total === 0) { msg('Nothing to freeze (no rotation)'); return; }
-		var m = 'Froze ' + total + ' item(s)';
-		if (converted) m += ' (' + converted + ' converted to mesh)';
-		msg(m);
+		msg('Froze ' + (cubes.length + meshes.length + groupsToFreeze.length) + ' item(s)');
 	}
 
 	// =====================================================================
@@ -556,18 +550,18 @@
 		author: 'CubrixStudio',
 		description: 'Modeling helpers for Blockbench: freeze/apply rotation, snap to grid, array/repeat, and align & distribute.',
 		about: 'Modeling Helper adds handy utilities to the Blockbench Edit mode, all operating on the current selection and fully undoable:\n\n' +
-			'- **Freeze Rotation** — bake an element\'s (or group\'s) rotation into its geometry so the Rotation field returns to 0 without the shape moving. 90° rotations stay as clean cubes; arbitrary angles are converted to a mesh.\n' +
+			'- **Freeze Rotation** — bake an element\'s (or group\'s) rotation into its geometry. Cubes always stay cubes: the 90° part is baked in and the residual is snapped to the nearest valid angle (0, ±22.5, ±45). Groups push their rotation onto their children.\n' +
 			'- **Snap to Grid** — round position, pivot and rotation of the selection to a clean grid (fixes dirty coordinates, makes Java-valid rotations).\n' +
 			'- **Array / Repeat** — duplicate the selection N times with a position offset and optional rotation increment.\n' +
 			'- **Align & Distribute** — align selected elements (min/center/max) on an axis, or distribute them evenly.',
 		icon: 'view_in_ar',
-		version: '1.0.0',
+		version: '1.1.0',
 		variant: 'both',
 		min_version: '4.9.0',
 		tags: ['Modeling', 'Edit'],
 
 		onload: function () {
-			register('mh_freeze_rotation', { name: 'Freeze Rotation', description: 'Bake the rotation of the selected cubes / meshes / groups into their geometry', icon: 'ac_unit' }, freezeRotation);
+			register('mh_freeze_rotation', { name: 'Freeze Rotation', description: 'Bake rotation into geometry — cubes stay cubes (residual snapped to 0/±22.5/±45)', icon: 'ac_unit' }, freezeRotation);
 			register('mh_snap_grid', { name: 'Snap to Grid...', description: 'Round position, pivot and rotation of the selection to a grid', icon: 'grid_on' }, openSnapDialog);
 			register('mh_array', { name: 'Array / Repeat...', description: 'Duplicate the selection N times with a fixed offset and rotation increment', icon: 'apps' }, openArrayDialog);
 			register('mh_align', { name: 'Align & Distribute...', description: 'Align selected elements on an axis or distribute them evenly', icon: 'align_horizontal_center' }, openAlignDialog);
